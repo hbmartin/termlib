@@ -88,6 +88,50 @@ class ShellIntegrationTest {
     }
 
     @Test
+    fun testOsc133OnCommandFinishedCallback() = runBlocking {
+        val durations = mutableListOf<Long>()
+        var outputAtCallback: String? = null
+        lateinit var emulator: TerminalEmulator
+        emulator = TerminalEmulatorFactory.create(
+            initialRows = 10,
+            initialCols = 40,
+            onCommandFinished = { durationMs ->
+                durations.add(durationMs)
+                outputAtCallback = emulator.getLastCommandOutput()
+            },
+        )
+
+        // Full shell integration flow: prompt, command input, output, finished
+        val input = "\u001B]133;A\u001B\\$ \u001B]133;B\u001B\\ls\r\n" +
+            "\u001B]133;C\u001B\\file1\r\n" +
+            "\u001B]133;D;0\u001B\\"
+        emulator.writeInput(input.toByteArray())
+
+        getSnapshot(emulator as TerminalEmulatorImpl)
+
+        assertEquals(1, durations.size)
+        assertTrue("Duration should be non-negative, was ${durations[0]}", durations[0] >= 0)
+        assertEquals("Callback should see the finished command's output", "file1", outputAtCallback)
+    }
+
+    @Test
+    fun testOsc133OnCommandFinishedWithoutStartMarker() = runBlocking {
+        val durations = mutableListOf<Long>()
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 10,
+            initialCols = 40,
+            onCommandFinished = { durationMs -> durations.add(durationMs) },
+        )
+
+        // Bare D without B/C markers reports an unknown duration
+        emulator.writeInput("\u001B]133;D;0\u001B\\".toByteArray())
+
+        getSnapshot(emulator as TerminalEmulatorImpl)
+
+        assertEquals(listOf(-1L), durations)
+    }
+
+    @Test
     fun testOsc1337Annotation() = runBlocking {
         val emulator = TerminalEmulatorFactory.create(
             initialRows = 10,

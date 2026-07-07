@@ -52,11 +52,12 @@ class OscParserTest {
 
         // 4. Command finished (D)
         actions = parser.parse(133, "D;0", row, 0, cols)
-        assertEquals(1, actions.size)
+        assertEquals(2, actions.size)
         val finishedAction = actions[0] as OscParser.Action.AddSegment
         assertEquals(SemanticType.COMMAND_FINISHED, finishedAction.type)
         assertEquals("0", finishedAction.metadata)
         assertEquals(promptAction.promptId, finishedAction.promptId)
+        assertTrue(actions[1] is OscParser.Action.CommandFinished)
     }
 
     @Test
@@ -90,10 +91,73 @@ class OscParserTest {
 
         // 4. Output prints, scrolls, then D at (35, 0)
         actions = parser.parse(133, "D;0", bottomRow, 0, cols)
-        assertEquals(1, actions.size)
+        assertEquals(2, actions.size)
         val finishedAction = actions[0] as OscParser.Action.AddSegment
         assertEquals(SemanticType.COMMAND_FINISHED, finishedAction.type)
         assertEquals(promptAction.promptId, finishedAction.promptId)
+        assertTrue(actions[1] is OscParser.Action.CommandFinished)
+    }
+
+    @Test
+    fun testOsc133CommandDurationMeasuredFromC() {
+        var nowMs = 1_000L
+        val parser = OscParser(elapsedTimeMs = { nowMs })
+        val cols = 80
+
+        parser.parse(133, "A", 0, 0, cols)
+        parser.parse(133, "B", 0, 2, cols)
+
+        // User spends 5 seconds typing, then the command executes for 250ms
+        nowMs += 5_000
+        parser.parse(133, "C", 0, 0, cols)
+        nowMs += 250
+
+        val actions = parser.parse(133, "D;0", 1, 0, cols)
+        val finished = actions.last() as OscParser.Action.CommandFinished
+        assertEquals(250L, finished.durationMs)
+    }
+
+    @Test
+    fun testOsc133CommandDurationFallsBackToB() {
+        var nowMs = 0L
+        val parser = OscParser(elapsedTimeMs = { nowMs })
+        val cols = 80
+
+        // Shell integration that only emits A/B/D
+        parser.parse(133, "A", 0, 0, cols)
+        parser.parse(133, "B", 0, 2, cols)
+        nowMs += 1_500
+
+        val actions = parser.parse(133, "D;0", 1, 0, cols)
+        val finished = actions.last() as OscParser.Action.CommandFinished
+        assertEquals(1_500L, finished.durationMs)
+    }
+
+    @Test
+    fun testOsc133CommandDurationUnknownWithoutStartMarker() {
+        val parser = OscParser(elapsedTimeMs = { 42L })
+
+        // Bare D without any preceding A/B/C markers
+        val actions = parser.parse(133, "D;0", 0, 0, 80)
+        val finished = actions.last() as OscParser.Action.CommandFinished
+        assertEquals(-1L, finished.durationMs)
+    }
+
+    @Test
+    fun testOsc133CommandDurationResetAfterD() {
+        var nowMs = 0L
+        val parser = OscParser(elapsedTimeMs = { nowMs })
+        val cols = 80
+
+        parser.parse(133, "C", 0, 0, cols)
+        nowMs += 100
+        var actions = parser.parse(133, "D;0", 0, 0, cols)
+        assertEquals(100L, (actions.last() as OscParser.Action.CommandFinished).durationMs)
+
+        // A second D without a new start marker has no duration
+        nowMs += 100
+        actions = parser.parse(133, "D;0", 0, 0, cols)
+        assertEquals(-1L, (actions.last() as OscParser.Action.CommandFinished).durationMs)
     }
 
     @Test
