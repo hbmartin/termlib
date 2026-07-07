@@ -359,7 +359,13 @@ internal class OscParser(
                 )
                 val startTimeMs = commandStartTimeMs
                 commandStartTimeMs = null
-                val durationMs = if (startTimeMs != null) elapsedTimeMs() - startTimeMs else -1L
+                // Coerce to non-negative so a clock anomaly can never collide
+                // with the -1 "no start marker" sentinel.
+                val durationMs = if (startTimeMs != null) {
+                    (elapsedTimeMs() - startTimeMs).coerceAtLeast(0L)
+                } else {
+                    -1L
+                }
                 actions.add(Action.CommandFinished(durationMs))
             }
         }
