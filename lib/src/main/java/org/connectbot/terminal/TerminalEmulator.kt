@@ -212,6 +212,13 @@ class TerminalEmulatorFactory {
          *                        The callback receives the decoded text to copy.
          * @param onProgressChange Optional callback for OSC 9;4 progress reporting.
          *                         The callback receives the progress state and percentage (0-100).
+         * @param onCommandFinished Optional callback invoked when a command finishes, signaled by
+         *                          OSC 133;D shell integration. The callback receives how long the
+         *                          command ran in milliseconds, measured from OSC 133;C (command
+         *                          execution start, falling back to OSC 133;B), or -1 if no start
+         *                          marker was seen. The snapshot is updated before the callback
+         *                          runs, so [TerminalEmulator.getLastCommandOutput] may be called
+         *                          from inside it to read the finished command's output.
          * @param autoDetectUrls Whether to continuously scan visible terminal line text for
          *                       plain-text URLs and expose them via hit-testing as a fallback
          *                       when no OSC 8 hyperlink covers the column. Defaults to false.
@@ -232,6 +239,7 @@ class TerminalEmulatorFactory {
             onResize: ((TerminalDimensions) -> Unit)? = null,
             onClipboardCopy: ((String) -> Unit)? = null,
             onProgressChange: ((ProgressState, Int) -> Unit)? = null,
+            onCommandFinished: ((durationMs: Long) -> Unit)? = null,
             autoDetectUrls: Boolean = false,
             boldAsBright: Boolean = true,
         ): TerminalEmulator = TerminalEmulatorImpl(
@@ -245,6 +253,7 @@ class TerminalEmulatorFactory {
             onResize = onResize,
             onClipboardCopy = onClipboardCopy,
             onProgressChange = onProgressChange,
+            onCommandFinished = onCommandFinished,
             autoDetectUrls = autoDetectUrls,
             boldAsBright = boldAsBright,
         )
@@ -280,6 +289,8 @@ class TerminalEmulatorFactory {
  * @param onResize Optional callback for terminal resize
  * @param onClipboardCopy Optional callback for OSC 52 clipboard copy operations
  * @param onProgressChange Optional callback for OSC 9;4 progress reporting
+ * @param onCommandFinished Optional callback for OSC 133;D command completion, receiving the
+ *                          command duration in milliseconds (-1 if no start marker was seen)
  */
 internal class TerminalEmulatorImpl(
     private val looper: Looper = Looper.getMainLooper(),
@@ -292,6 +303,7 @@ internal class TerminalEmulatorImpl(
     private val onResize: ((TerminalDimensions) -> Unit)? = null,
     private val onClipboardCopy: ((String) -> Unit)? = null,
     private val onProgressChange: ((ProgressState, Int) -> Unit)? = null,
+    private val onCommandFinished: ((durationMs: Long) -> Unit)? = null,
     override val autoDetectUrls: Boolean = false,
     override val boldAsBright: Boolean = true,
 ) : TerminalEmulator,
@@ -313,6 +325,11 @@ internal class TerminalEmulatorImpl(
 
     // Pending semantic segments to apply during processPendingUpdates
     private val pendingSemanticSegments = mutableListOf<PendingSemanticSegment>()
+
+    // Command durations from OSC 133;D awaiting delivery to onCommandFinished.
+    // Reported after the snapshot is emitted so getLastCommandOutput() sees the
+    // finished command when called from inside the callback.
+    private val pendingCommandFinishedDurations = mutableListOf<Long>()
     private val movedSegmentRows = mutableSetOf<Int>()
     private val semanticSegmentTexts = mutableMapOf<SemanticSegmentKey, String>()
 
@@ -817,6 +834,16 @@ internal class TerminalEmulatorImpl(
                             onProgressChange?.invoke(action.state, action.progress)
                         }
                     }
+
+                    is OscParser.Action.CommandFinished -> {
+                        if (onCommandFinished != null) {
+                            // Deliver from processPendingUpdates (after the snapshot is emitted)
+                            // so the finished command's output is visible to the callback.
+                            pendingCommandFinishedDurations.add(action.durationMs)
+                            propertyChanged = true
+                            requestProcessPendingUpdatesLocked()
+                        }
+                    }
                 }
             }
         }
@@ -885,13 +912,17 @@ internal class TerminalEmulatorImpl(
         val damageRegions: List<DamageRegion>
         val needsUpdate: Boolean
         val movedRows: Set<Int>
+        val commandFinishedDurations: List<Long>
         synchronized(damageLock) {
             damageRegions = pendingDamageRegions.toList()
             pendingDamageRegions.clear()
             movedRows = movedSegmentRows.toSet()
             movedSegmentRows.clear()
+            commandFinishedDurations = pendingCommandFinishedDurations.toList()
+            pendingCommandFinishedDurations.clear()
             damagePosted = false
-            needsUpdate = damageRegions.isNotEmpty() || cursorMoved || propertyChanged
+            needsUpdate = damageRegions.isNotEmpty() || cursorMoved || propertyChanged ||
+                commandFinishedDurations.isNotEmpty()
             cursorMoved = false
             propertyChanged = false
         }
@@ -922,6 +953,12 @@ internal class TerminalEmulatorImpl(
         // Build and emit new snapshot
         val newSnapshot = buildSnapshot()
         _snapshot.value = newSnapshot
+
+        // Notify command completion after the snapshot is emitted so
+        // getLastCommandOutput() reflects the finished command.
+        for (durationMs in commandFinishedDurations) {
+            onCommandFinished?.invoke(durationMs)
+        }
     }
 
     /**

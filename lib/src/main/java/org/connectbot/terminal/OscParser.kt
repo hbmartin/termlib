@@ -34,10 +34,21 @@ enum class ProgressState {
  * Parser for OSC (Operating System Command) sequences.
  * Handles clipboard operations (OSC 52), shell integration (OSC 133),
  * iTerm2 extensions (OSC 1337), hyperlinks (OSC 8), and progress reporting (OSC 9;4).
+ *
+ * @param elapsedTimeMs Monotonic clock in milliseconds, used to measure command
+ *                      durations for [Action.CommandFinished]. Injectable for tests.
  */
-internal class OscParser {
+internal class OscParser(
+    private val elapsedTimeMs: () -> Long = { System.nanoTime() / NANOS_PER_MS },
+) {
     // Track current prompt ID for grouping command blocks
     private var currentPromptId = 0
+
+    // Time when the current command started, for measuring command duration.
+    // Set at OSC 133;B (command input start) and refined at OSC 133;C
+    // (command execution start), so the duration reported at D normally covers
+    // execution only, falling back to including input time if C is never sent.
+    private var commandStartTimeMs: Long? = null
 
     // Track the column where the current semantic segment starts
     private var currentSegmentStartCol = 0
@@ -80,6 +91,17 @@ internal class OscParser {
         data class SetProgress(
             val state: ProgressState,
             val progress: Int,
+        ) : Action()
+
+        /**
+         * Action to notify that a command finished via OSC 133;D.
+         *
+         * @param durationMs How long the command ran, in milliseconds, measured
+         *        from OSC 133;C (command execution start), falling back to
+         *        OSC 133;B (command input start). -1 if no start marker was seen.
+         */
+        data class CommandFinished(
+            val durationMs: Long,
         ) : Action()
     }
 
@@ -311,6 +333,7 @@ internal class OscParser {
                     ),
                 )
                 currentSegmentStartCol = cursorCol
+                commandStartTimeMs = elapsedTimeMs()
             }
 
             payload == "C" -> {
@@ -318,6 +341,7 @@ internal class OscParser {
                 // If C is on the same row as B and cursor advanced, we could
                 // update the COMMAND_INPUT endCol, but the marker from B is
                 // sufficient for getLastCommandOutput() to work.
+                commandStartTimeMs = elapsedTimeMs()
             }
 
             payload.startsWith("D") -> {
@@ -333,6 +357,16 @@ internal class OscParser {
                         promptId = currentPromptId,
                     ),
                 )
+                val startTimeMs = commandStartTimeMs
+                commandStartTimeMs = null
+                // Coerce to non-negative so a clock anomaly can never collide
+                // with the -1 "no start marker" sentinel.
+                val durationMs = if (startTimeMs != null) {
+                    (elapsedTimeMs() - startTimeMs).coerceAtLeast(0L)
+                } else {
+                    -1L
+                }
+                actions.add(Action.CommandFinished(durationMs))
             }
         }
         return actions
@@ -373,5 +407,9 @@ internal class OscParser {
             }
         }
         return actions
+    }
+
+    companion object {
+        private const val NANOS_PER_MS = 1_000_000L
     }
 }

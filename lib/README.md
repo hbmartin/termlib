@@ -37,6 +37,31 @@ Terminal(
 )
 ```
 
+## Shell Integration (OSC 133)
+
+When the connected shell emits OSC 133 semantic prompt markers (A=prompt start,
+B=command input start, C=command execution start, D=command finished), the
+library can:
+
+- Notify when a command finishes via the `onCommandFinished` factory callback.
+  It receives the command duration in milliseconds, measured from OSC 133;C
+  (falling back to OSC 133;B), or -1 if no start marker was seen.
+- Return the output of the most recently completed command via
+  `TerminalEmulator.getLastCommandOutput()`.
+
+```kotlin
+lateinit var emulator: TerminalEmulator
+emulator = TerminalEmulatorFactory.create(
+    onKeyboardInput = {
+        // … send data to PTY/SSH/etc
+    },
+    onCommandFinished = { durationMs ->
+        // e.g. notify the user when a long-running command completes
+        val output = emulator.getLastCommandOutput()
+    },
+)
+```
+
 ## Architecture
 
 ```
