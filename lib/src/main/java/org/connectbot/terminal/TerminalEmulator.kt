@@ -836,11 +836,13 @@ internal class TerminalEmulatorImpl(
                     }
 
                     is OscParser.Action.CommandFinished -> {
-                        // Deliver from processPendingUpdates (after the snapshot is emitted)
-                        // so the finished command's output is visible to the callback.
-                        pendingCommandFinishedDurations.add(action.durationMs)
-                        propertyChanged = true
-                        requestProcessPendingUpdatesLocked()
+                        if (onCommandFinished != null) {
+                            // Deliver from processPendingUpdates (after the snapshot is emitted)
+                            // so the finished command's output is visible to the callback.
+                            pendingCommandFinishedDurations.add(action.durationMs)
+                            propertyChanged = true
+                            requestProcessPendingUpdatesLocked()
+                        }
                     }
                 }
             }

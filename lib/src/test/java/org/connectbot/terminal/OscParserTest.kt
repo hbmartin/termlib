@@ -144,6 +144,23 @@ class OscParserTest {
     }
 
     @Test
+    fun testOsc133CommandDurationClampedWhenClockGoesBackwards() {
+        var nowMs = 1_000L
+        val parser = OscParser(elapsedTimeMs = { nowMs })
+        val cols = 80
+
+        parser.parse(133, "C", 0, 0, cols)
+
+        // A clock anomaly must not produce a negative duration that could
+        // collide with the -1 "no start marker" sentinel
+        nowMs -= 1
+
+        val actions = parser.parse(133, "D;0", 0, 0, cols)
+        val finished = actions.last() as OscParser.Action.CommandFinished
+        assertEquals(0L, finished.durationMs)
+    }
+
+    @Test
     fun testOsc133CommandDurationResetAfterD() {
         var nowMs = 0L
         val parser = OscParser(elapsedTimeMs = { nowMs })
