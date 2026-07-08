@@ -361,6 +361,10 @@ internal class SelectionManager {
 
     private fun isBlankCell(cell: TerminalLine.Cell): Boolean = (cell.char == ' ' || cell.char == '\u0000') && cell.combiningChars.isEmpty()
 
+    // NUL placeholder cells (e.g. TerminalLine.empty) must not leak into the
+    // clipboard; map them to spaces so trimEnd()/trim() can drop them.
+    private fun visibleChar(c: Char): Char = if (c == '\u0000') ' ' else c
+
     private fun lastContentCol(line: TerminalLine): Int {
         var last = line.cells.lastIndex
         while (last > 0 && isBlankCell(line.cells[last])) last--
@@ -392,7 +396,7 @@ internal class SelectionManager {
                         // Build line text and trim trailing whitespace.
                         val lineText = buildString {
                             line.cells.forEach { cell ->
-                                append(cell.char)
+                                append(visibleChar(cell.char))
                                 cell.combiningChars.forEach { append(it) }
                             }
                         }.trimEnd()
@@ -414,7 +418,7 @@ internal class SelectionManager {
                         val lineText = buildString {
                             for (col in startCol..minOf(endCol, line.cells.lastIndex)) {
                                 val cell = line.cells[col]
-                                append(cell.char)
+                                append(visibleChar(cell.char))
                                 cell.combiningChars.forEach { append(it) }
                             }
                         }.trimEnd()
