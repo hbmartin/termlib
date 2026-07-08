@@ -583,4 +583,97 @@ class SelectionManagerTest {
         range = selectionManager.selectionRange!!
         assertEquals(11, range.endRow) // Still at 11
     }
+
+    // Regression for upstream connectbot#528: the rightmost selected column
+    // must be included in the copied text.
+    @Test
+    fun testGetSelectedTextIncludesRightmostColumn() {
+        val snapshot = makeSnapshot("0123456789", cols = 10)
+
+        selectionManager.startSelection(0, 0, cols = 10, mode = SelectionMode.CHARACTER)
+        selectionManager.updateSelection(0, 9)
+        selectionManager.endSelection()
+
+        assertEquals("0123456789", selectionManager.getSelectedText(snapshot))
+    }
+
+    @Test
+    fun testGetSelectedTextIncludesLastColumnOfMiddleRows() {
+        val snapshot = makeMultiLineSnapshot(listOf("abcde", "fghij", "klmno"), cols = 5)
+
+        selectionManager.startSelection(0, 2, cols = 5, mode = SelectionMode.CHARACTER)
+        selectionManager.updateSelection(2, 2)
+        selectionManager.endSelection()
+
+        assertEquals("cde\nfghij\nklm", selectionManager.getSelectedText(snapshot))
+    }
+
+    // Regression for the modern cousin of upstream connectbot#800: NUL
+    // placeholder cells (TerminalLine.empty) must never leak into the
+    // clipboard as literal NUL characters.
+    @Test
+    fun testGetSelectedTextContainsNoNullCharsFromPlaceholderLines() {
+        val lines = listOf(
+            TerminalLine(row = 0, cells = "hello".map { cell(it) }),
+            TerminalLine.empty(row = 1, cols = 5),
+        )
+        val snapshot = makeSnapshotFromLines(lines, cols = 5)
+
+        selectionManager.startSelection(0, 0, cols = 5, mode = SelectionMode.CHARACTER)
+        selectionManager.updateSelection(1, 4)
+        selectionManager.endSelection()
+
+        val text = selectionManager.getSelectedText(snapshot)
+        assertFalse(text.contains('\u0000'))
+        assertEquals("hello", text)
+    }
+
+    @Test
+    fun testGetSelectedTextLineModeContainsNoNullChars() {
+        val lines = listOf(
+            TerminalLine(row = 0, cells = "ok".map { cell(it) }),
+            TerminalLine.empty(row = 1, cols = 4),
+        )
+        val snapshot = makeSnapshotFromLines(lines, cols = 4)
+
+        selectionManager.startSelection(0, 0, cols = 4, mode = SelectionMode.LINE)
+        selectionManager.updateSelection(1, 0)
+        selectionManager.endSelection()
+
+        val text = selectionManager.getSelectedText(snapshot)
+        assertFalse(text.contains('\u0000'))
+        assertEquals("ok", text)
+    }
+
+    @Test
+    fun testGetSelectedTextMapsEmbeddedNullCellsToSpaces() {
+        val cells = listOf(cell('a'), cell('\u0000'), cell('b'))
+        val snapshot = makeSnapshotFromLines(listOf(TerminalLine(row = 0, cells = cells)), cols = 3)
+
+        selectionManager.startSelection(0, 0, cols = 3, mode = SelectionMode.CHARACTER)
+        selectionManager.updateSelection(0, 2)
+        selectionManager.endSelection()
+
+        assertEquals("a b", selectionManager.getSelectedText(snapshot))
+    }
+
+    private fun makeSnapshotFromLines(lines: List<TerminalLine>, cols: Int): TerminalSnapshot = TerminalSnapshot(
+        lines = lines,
+        scrollback = emptyList(),
+        cursorRow = 0,
+        cursorCol = 0,
+        cursorVisible = true,
+        cursorBlink = true,
+        cursorShape = CursorShape.BLOCK,
+        terminalTitle = "",
+        rows = lines.size,
+        cols = cols,
+        timestamp = System.currentTimeMillis(),
+        sequenceNumber = 1L,
+    )
+
+    private fun makeMultiLineSnapshot(rows: List<String>, cols: Int): TerminalSnapshot = makeSnapshotFromLines(
+        rows.mapIndexed { i, text -> TerminalLine(row = i, cells = text.map { cell(it) }) },
+        cols,
+    )
 }
