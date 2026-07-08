@@ -337,6 +337,7 @@ internal class TerminalEmulatorImpl(
     // enforce minUpdateIntervalMs between snapshot emissions. Starts one
     // interval in the past so the first update is never deferred.
     private var lastUpdateUptimeMs = SystemClock.uptimeMillis() - minUpdateIntervalMs
+    private val processPendingUpdatesRunnable = Runnable { processPendingUpdates() }
     private var cursorMoved = false
     private var propertyChanged = false
 
@@ -1391,7 +1392,7 @@ internal class TerminalEmulatorImpl(
         damagePosted = true
         if (minUpdateIntervalMs > 0L) {
             val delayMs = lastUpdateUptimeMs + minUpdateIntervalMs - SystemClock.uptimeMillis()
-            handler.postDelayed({ processPendingUpdates() }, delayMs.coerceAtLeast(0L))
+            handler.postDelayed(processPendingUpdatesRunnable, delayMs.coerceAtLeast(0L))
         } else if (looper == Looper.getMainLooper()) {
             handler.post {
                 Choreographer.getInstance().postFrameCallback {
