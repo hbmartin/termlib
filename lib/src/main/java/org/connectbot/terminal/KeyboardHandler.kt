@@ -222,19 +222,18 @@ internal class KeyboardHandler(
                     return true
                 }
 
-                Key.Enter -> {
-                    // Finish selection (stop extending, but keep selected for copying)
-                    selection.finishSelection()
-                    return true
-                }
-
                 Key.Escape -> {
                     // Cancel selection
                     selection.clearSelection()
                     return true
                 }
 
-                // Any other key clears selection and goes to terminal
+                // Any other key (including Enter) clears selection and goes to
+                // the terminal. Enter must not be consumed here: touch selections
+                // are finished by lifting the finger, so an Enter arriving with a
+                // finished-but-not-cleared selection would otherwise be swallowed
+                // as a no-op every time, leaving the key permanently dead until
+                // some other guarded key healed the state.
                 else -> {
                     selection.clearSelection()
                     // Fall through to normal key handling
@@ -313,11 +312,26 @@ internal class KeyboardHandler(
     }
 
     /**
+     * IME text bypasses [onKeyEvent], so it never reaches the selection guard
+     * there. Dismiss any active selection here as well, so soft-keyboard typing
+     * behaves like hardware typing and cannot leave a stale selection armed
+     * (which would silently consume selection-guarded keys such as Enter).
+     */
+    private fun clearSelectionForTextInput() {
+        val selection = selectionController
+        if (selection != null && selection.isSelectionActive) {
+            selection.clearSelection()
+        }
+    }
+
+    /**
      * Process text input from IME (Input Method Editor).
      * This handles multi-byte UTF-8 text from the software keyboard.
      */
     fun onTextInput(bytes: ByteArray) {
         if (bytes.isEmpty()) return
+
+        clearSelectionForTextInput()
 
         val raw = bytes.toString(Charsets.UTF_8)
         val text = if (Normalizer.isNormalized(raw, Normalizer.Form.NFC)) {
@@ -350,6 +364,8 @@ internal class KeyboardHandler(
      */
     fun onCommittedText(text: String) {
         if (text.isEmpty()) return
+
+        clearSelectionForTextInput()
 
         val normalized = if (Normalizer.isNormalized(text, Normalizer.Form.NFC)) {
             text

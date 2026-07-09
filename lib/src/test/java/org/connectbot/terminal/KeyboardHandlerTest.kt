@@ -908,6 +908,124 @@ class KeyboardHandlerTest {
         assertTrue("Sticky Ctrl+newline should produce output", received.isNotEmpty())
     }
 
+    // === Selection guard tests ===
+
+    private class FakeSelectionController(
+        var active: Boolean = true,
+    ) : SelectionController {
+        var clearCount = 0
+        var finishCount = 0
+        var moveCount = 0
+
+        override val isSelectionActive: Boolean
+            get() = active
+
+        override fun startSelection(mode: SelectionMode) { active = true }
+        override fun toggleSelection() { active = !active }
+        override fun moveSelectionUp() { moveCount++ }
+        override fun moveSelectionDown() { moveCount++ }
+        override fun moveSelectionLeft() { moveCount++ }
+        override fun moveSelectionRight() { moveCount++ }
+        override fun toggleSelectionMode() {}
+        override fun setSelectionMode(mode: SelectionMode) {}
+        override fun selectAll() { active = true }
+        override fun finishSelection() { finishCount++ }
+        override fun copySelection(): String = ""
+        override fun clearSelection() {
+            clearCount++
+            active = false
+        }
+    }
+
+    private fun collectCharacterOutputWithSelection(
+        selection: FakeSelectionController,
+        block: (KeyboardHandler) -> Unit,
+    ): ByteArray {
+        val outputs = mutableListOf<ByteArray>()
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 24,
+            initialCols = 80,
+            onKeyboardInput = { data -> outputs.add(data.copyOf()) },
+        )
+        val handler = KeyboardHandler(emulator, selectionController = selection)
+        block(handler)
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        return outputs.flatMap { it.toList() }.toByteArray()
+    }
+
+    @Test
+    fun testEnterWithActiveSelectionClearsSelectionAndReachesTerminal() {
+        // Regression test for connectbot/connectbot#2252: a finished-but-not-cleared
+        // selection used to swallow Enter as a no-op forever.
+        val plainEnter = collectCharacterOutput { it.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown)) }
+
+        val selection = FakeSelectionController(active = true)
+        val withSelection = collectCharacterOutputWithSelection(selection) {
+            it.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown))
+        }
+
+        assertEquals(1, selection.clearCount)
+        assertEquals(0, selection.finishCount)
+        assertEquals(plainEnter.toList(), withSelection.toList())
+    }
+
+    @Test
+    fun testEscapeWithActiveSelectionClearsSelectionAndIsConsumed() {
+        val selection = FakeSelectionController(active = true)
+        val output = collectCharacterOutputWithSelection(selection) {
+            it.onKeyEvent(createKeyEvent(Key.Escape, KeyEventType.KeyDown))
+        }
+
+        assertEquals(1, selection.clearCount)
+        assertEquals(0, output.size)
+    }
+
+    @Test
+    fun testArrowWithActiveSelectionMovesSelectionAndIsConsumed() {
+        val selection = FakeSelectionController(active = true)
+        val output = collectCharacterOutputWithSelection(selection) {
+            it.onKeyEvent(createKeyEvent(Key.DirectionUp, KeyEventType.KeyDown))
+        }
+
+        assertEquals(1, selection.moveCount)
+        assertEquals(0, selection.clearCount)
+        assertEquals(0, output.size)
+    }
+
+    @Test
+    fun testCommittedTextClearsActiveSelection() {
+        // IME commitText() bypasses onKeyEvent, so it must dismiss the selection
+        // itself — otherwise soft-keyboard typing never heals a stale selection.
+        val selection = FakeSelectionController(active = true)
+        val output = collectCharacterOutputWithSelection(selection) {
+            it.onCommittedText("a")
+        }
+
+        assertEquals(1, selection.clearCount)
+        assertTrue(output.isNotEmpty())
+    }
+
+    @Test
+    fun testTextInputClearsActiveSelection() {
+        val selection = FakeSelectionController(active = true)
+        val output = collectCharacterOutputWithSelection(selection) {
+            it.onTextInput("a".toByteArray(Charsets.UTF_8))
+        }
+
+        assertEquals(1, selection.clearCount)
+        assertTrue(output.isNotEmpty())
+    }
+
+    @Test
+    fun testCommittedTextWithInactiveSelectionDoesNotClear() {
+        val selection = FakeSelectionController(active = false)
+        collectCharacterOutputWithSelection(selection) {
+            it.onCommittedText("a")
+        }
+
+        assertEquals(0, selection.clearCount)
+    }
+
     private fun keyToAndroidKeyCode(key: Key): Int = when (key) {
         Key.A -> AndroidKeyEvent.KEYCODE_A
         Key.B -> AndroidKeyEvent.KEYCODE_B
@@ -917,6 +1035,7 @@ class KeyboardHandlerTest {
         Key.Backspace -> AndroidKeyEvent.KEYCODE_DEL
         Key.Tab -> AndroidKeyEvent.KEYCODE_TAB
         Key.Escape -> AndroidKeyEvent.KEYCODE_ESCAPE
+        Key.DirectionUp -> AndroidKeyEvent.KEYCODE_DPAD_UP
         else -> AndroidKeyEvent.KEYCODE_UNKNOWN
     }
 }
