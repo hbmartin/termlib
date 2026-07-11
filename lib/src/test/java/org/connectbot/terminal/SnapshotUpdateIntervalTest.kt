@@ -158,7 +158,29 @@ class SnapshotUpdateIntervalTest {
     }
 
     @Test
-    fun writeAfterCloseThrows() {
+    fun writeAfterCloseIsSilentlyDropped() {
+        // PTY reader threads commonly race teardown, so late writes are
+        // discarded rather than treated as a programming error.
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 5,
+            initialCols = 20,
+        )
+        val impl = emulator as TerminalEmulatorImpl
+        val looper = shadowOf(Looper.getMainLooper())
+
+        emulator.writeInput("a".toByteArray())
+        looper.idle()
+        assertEquals("a", screenText(impl))
+
+        emulator.close()
+
+        emulator.writeInput("b".toByteArray())
+        looper.idle()
+        assertEquals("a", screenText(impl))
+    }
+
+    @Test
+    fun resizeAfterCloseThrows() {
         val emulator = TerminalEmulatorFactory.create(
             initialRows = 5,
             initialCols = 20,
@@ -167,7 +189,56 @@ class SnapshotUpdateIntervalTest {
         emulator.close()
 
         assertThrows(IllegalStateException::class.java) {
-            emulator.writeInput("a".toByteArray())
+            emulator.resize(10, 40)
         }
+    }
+
+    @Test
+    fun dispatchKeyAfterCloseThrows() {
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 5,
+            initialCols = 20,
+        )
+
+        emulator.close()
+
+        assertThrows(IllegalStateException::class.java) {
+            emulator.dispatchKey(0, VTermKey.ENTER)
+        }
+    }
+
+    @Test
+    fun closeIsIdempotent() {
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 5,
+            initialCols = 20,
+        )
+        val looper = shadowOf(Looper.getMainLooper())
+
+        // Initialize the native terminal so the second close exercises the
+        // already-closed path rather than the never-initialized path.
+        emulator.writeInput("a".toByteArray())
+        looper.idle()
+
+        emulator.close()
+        emulator.close()
+    }
+
+    @Test
+    fun snapshotRemainsReadableAfterClose() {
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 5,
+            initialCols = 20,
+        )
+        val impl = emulator as TerminalEmulatorImpl
+        val looper = shadowOf(Looper.getMainLooper())
+
+        emulator.writeInput("a".toByteArray())
+        looper.idle()
+
+        emulator.close()
+
+        assertEquals("a", screenText(impl))
+        assertEquals(emptyList<TerminalUrl>(), emulator.getUrls())
     }
 }

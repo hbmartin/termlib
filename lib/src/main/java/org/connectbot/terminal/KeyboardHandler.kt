@@ -228,12 +228,21 @@ internal class KeyboardHandler(
                     return true
                 }
 
-                // Any other key (including Enter) clears selection and goes to
-                // the terminal. Enter must not be consumed here: touch selections
-                // are finished by lifting the finger, so an Enter arriving with a
-                // finished-but-not-cleared selection would otherwise be swallowed
-                // as a no-op every time, leaving the key permanently dead until
-                // some other guarded key healed the state.
+                Key.Enter -> {
+                    if (selection.isSelectionExtending) {
+                        // A keyboard-driven selection is still growing: Enter
+                        // finishes it (stops extending, keeps it highlighted for
+                        // copying) and is consumed, like classic copy-mode.
+                        selection.finishSelection()
+                        return true
+                    }
+                    // A finished-but-not-cleared selection (touch selections end
+                    // by lifting the finger) must not swallow Enter as a no-op
+                    // forever: clear it and fall through to normal key handling.
+                    selection.clearSelection()
+                }
+
+                // Any other key clears selection and goes to the terminal
                 else -> {
                     selection.clearSelection()
                     // Fall through to normal key handling

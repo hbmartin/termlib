@@ -31,6 +31,15 @@ interface SelectionController {
     val isSelectionActive: Boolean
 
     /**
+     * True while the selection is still being extended (a keyboard-driven
+     * selection before [finishSelection], or a touch drag in progress). A
+     * finished selection stays [isSelectionActive] for copying but no longer
+     * extends. Defaults to false for implementations without this distinction.
+     */
+    val isSelectionExtending: Boolean
+        get() = false
+
+    /**
      * Start selection mode at the current cursor position or center of screen.
      * @param mode The selection mode to use (CHARACTER, WORD, or LINE)
      */

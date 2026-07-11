@@ -65,6 +65,7 @@ package org.connectbot.terminal {
     method public String copySelection();
     method public void finishSelection();
     method @InaccessibleFromKotlin public boolean isSelectionActive();
+    method @InaccessibleFromKotlin public default boolean isSelectionExtending();
     method public void moveSelectionDown();
     method public void moveSelectionLeft();
     method public void moveSelectionRight();
@@ -75,6 +76,7 @@ package org.connectbot.terminal {
     method public void toggleSelection();
     method public void toggleSelectionMode();
     property public abstract boolean isSelectionActive;
+    property public default boolean isSelectionExtending;
   }
 
   public abstract sealed exhaustive class SelectionMode {
@@ -272,3 +274,4 @@ package org.connectbot.terminal {
   }
 
 }
+

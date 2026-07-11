@@ -607,6 +607,9 @@ internal fun TerminalWithAccessibility(
             override val isSelectionActive: Boolean
                 get() = selectionManager.mode != SelectionMode.NONE
 
+            override val isSelectionExtending: Boolean
+                get() = selectionManager.isSelecting
+
             override fun startSelection(mode: SelectionMode) {
                 if (selectionManager.mode == SelectionMode.NONE) {
                     // Start at cursor position or center of screen
