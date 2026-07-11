@@ -19,9 +19,11 @@ package org.connectbot.terminal
 import android.os.Looper
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Shadows.shadowOf
+import org.robolectric.shadows.ShadowChoreographer
 import java.time.Duration
 
 /**
@@ -104,5 +106,68 @@ class SnapshotUpdateIntervalTest {
         emulator.writeInput("b".toByteArray())
         looper.idle()
         assertEquals("ab", screenText(impl))
+    }
+
+    @Test
+    fun closeCancelsDelayedUpdate() {
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 5,
+            initialCols = 20,
+            minUpdateIntervalMs = 250L,
+        )
+        val impl = emulator as TerminalEmulatorImpl
+        val looper = shadowOf(Looper.getMainLooper())
+
+        emulator.writeInput("a".toByteArray())
+        looper.idle()
+        assertEquals("a", screenText(impl))
+        val seqAfterFirst = impl.snapshot.value.sequenceNumber
+
+        emulator.writeInput("b".toByteArray())
+        looper.idle()
+        assertEquals(seqAfterFirst, impl.snapshot.value.sequenceNumber)
+
+        emulator.close()
+        looper.idleFor(Duration.ofMillis(250))
+
+        assertEquals(seqAfterFirst, impl.snapshot.value.sequenceNumber)
+        assertEquals("a", screenText(impl))
+    }
+
+    @Test
+    fun closeCancelsPendingFrameCallback() {
+        ShadowChoreographer.setPostFrameCallbackDelay(100)
+        try {
+            val emulator = TerminalEmulatorFactory.create(
+                initialRows = 5,
+                initialCols = 20,
+            )
+            val impl = emulator as TerminalEmulatorImpl
+            val looper = shadowOf(Looper.getMainLooper())
+
+            emulator.writeInput("a".toByteArray())
+            looper.runOneTask()
+
+            emulator.close()
+            looper.idleFor(Duration.ofMillis(100))
+
+            assertEquals(0L, impl.snapshot.value.sequenceNumber)
+        } finally {
+            ShadowChoreographer.reset()
+        }
+    }
+
+    @Test
+    fun writeAfterCloseThrows() {
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 5,
+            initialCols = 20,
+        )
+
+        emulator.close()
+
+        assertThrows(IllegalStateException::class.java) {
+            emulator.writeInput("a".toByteArray())
+        }
     }
 }
