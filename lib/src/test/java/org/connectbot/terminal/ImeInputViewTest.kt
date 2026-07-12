@@ -302,6 +302,32 @@ class ImeInputViewTest {
     }
 
     @Test
+    fun testStaleConnectionDoesNotDispatchFallbackEnter() {
+        val outputs = mutableListOf<ByteArray>()
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 24,
+            initialCols = 80,
+            onKeyboardInput = { data -> outputs.add(data.copyOf()) },
+        )
+        val handler = KeyboardHandler(emulator)
+        lateinit var view: ImeInputView
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            view = ImeInputView(context, handler)
+            view.isComposeModeActive = true
+            view.setOnKeyListener { _, _, event ->
+                handler.onKeyEvent(androidx.compose.ui.input.key.KeyEvent(event))
+            }
+            val staleConnection = view.onCreateInputConnection(EditorInfo())
+            staleConnection.commitText("\n", 1)
+            view.onCreateInputConnection(EditorInfo())
+        }
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(20))
+
+        assertEquals(0, enterCount(outputs))
+    }
+
+    @Test
     fun testPhysicalKeyboardResetPolicyOnlyUsesCommandBoundaries() {
         assertTrue(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_ENTER))
         assertTrue(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_NUMPAD_ENTER))

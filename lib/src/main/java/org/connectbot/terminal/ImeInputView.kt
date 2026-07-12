@@ -166,9 +166,11 @@ internal class ImeInputView(
         private var unpairedEnterKeyEventAt = Long.MIN_VALUE
         private val enterFallbackRunnable = Runnable {
             enterFallbackPending = false
-            this@ImeInputView.dispatchKeyEvent(
-                KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER),
-            )
+            if (this === activeConnection) {
+                this@ImeInputView.dispatchKeyEvent(
+                    KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER),
+                )
+            }
         }
 
         /**

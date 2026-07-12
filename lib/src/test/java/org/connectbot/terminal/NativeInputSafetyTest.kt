@@ -22,6 +22,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.lang.reflect.Method
 import java.nio.ByteBuffer
 
 @RunWith(AndroidJUnit4::class)
@@ -49,6 +50,30 @@ class NativeInputSafetyTest {
     }
 
     @Test
+    fun nullDirectBufferIsIgnoredBeforeCapacityLookup() {
+        val emulator = TerminalEmulatorFactory.create(initialRows = 3, initialCols = 20)
+        val terminal = TerminalNative(emulator as TerminalCallbacks)
+
+        try {
+            val nativePtr = TerminalNative::class.java.getDeclaredField("nativePtr").run {
+                isAccessible = true
+                getLong(terminal)
+            }
+            val writeInputBuffer: Method = TerminalNative::class.java.getDeclaredMethod(
+                "nativeWriteInputBuffer",
+                Long::class.javaPrimitiveType,
+                ByteBuffer::class.java,
+                Int::class.javaPrimitiveType,
+            ).apply { isAccessible = true }
+
+            assertEquals(0, writeInputBuffer.invoke(terminal, nativePtr, null, 1))
+        } finally {
+            terminal.close()
+            emulator.close()
+        }
+    }
+
+    @Test
     fun combiningHeavyCellRunsStayWithinNativeBuffer() {
         val emulator = TerminalEmulatorFactory.create(initialRows = 3, initialCols = 80)
         val packedCell = "a\u0300\u0301\u0302\u0303\u0304"
@@ -58,5 +83,25 @@ class NativeInputSafetyTest {
         val line = snapshot(emulator).lines.first()
         assertTrue(line.text.startsWith("a"))
         assertTrue(line.cells.isNotEmpty())
+    }
+
+    @Test
+    fun fullCellRunDoesNotSkipTailOfCurrentCell() {
+        val emulator = TerminalEmulatorFactory.create(initialRows = 3, initialCols = 80)
+        val terminal = TerminalNative(emulator as TerminalCallbacks)
+        val fiveCodeUnitCell = "a\u0300\u0301\u0302\u0303"
+        val prefix = fiveCodeUnitCell.repeat(51)
+
+        try {
+            terminal.resize(rows = 3, cols = 80)
+            terminal.writeInput("$prefix\uD83D\uDE00z".toByteArray())
+
+            val run = CellRun()
+            assertEquals(prefix.length, terminal.getCellRun(row = 0, col = 0, run))
+            assertEquals(prefix, String(run.chars, 0, prefix.length))
+        } finally {
+            terminal.close()
+            emulator.close()
+        }
     }
 }

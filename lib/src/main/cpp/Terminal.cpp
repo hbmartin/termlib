@@ -468,11 +468,17 @@ int Terminal::getCellRun(JNIEnv* env, int row, int col, jobject runObject) {
                 uint32_t codepoint = currentCell.chars[i];
 
                 if (codepoint <= 0xFFFF) {
-                    if (runLength >= 256) break;
+                    if (runLength >= 256) {
+                        c = mCols;
+                        break;
+                    }
                     chars[runLength++] = (jchar)codepoint;
                 } else {
                     // Surrogate pair for codepoints > U+FFFF — needs 2 slots.
-                    if (runLength + 2 > 256) break;
+                    if (runLength + 2 > 256) {
+                        c = mCols;
+                        break;
+                    }
                     codepoint -= 0x10000;
                     chars[runLength++] = (jchar)(0xD800 + (codepoint >> 10));
                     chars[runLength++] = (jchar)(0xDC00 + (codepoint & 0x3FF));
@@ -1190,6 +1196,9 @@ JNIEXPORT jint JNICALL
 Java_org_connectbot_terminal_TerminalNative_nativeWriteInputBuffer(JNIEnv* env, jobject /* thiz */,
                                                                    jlong ptr, jobject buffer, jint length) {
     auto* term = reinterpret_cast<Terminal*>(ptr);
+    if (buffer == nullptr) {
+        return 0;
+    }
     const jlong capacity = env->GetDirectBufferCapacity(buffer);
     if (length < 0 || capacity < 0 || static_cast<jlong>(length) > capacity) {
         return 0;
