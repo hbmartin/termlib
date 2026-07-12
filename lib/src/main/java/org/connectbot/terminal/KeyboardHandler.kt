@@ -306,6 +306,8 @@ internal class KeyboardHandler(
      * This is called for printable characters.
      */
     fun onCharacterInput(char: Char, ctrl: Boolean = false, alt: Boolean = false): Boolean {
+        if (selectionConsumesInput(isEnter = char == '\n')) return true
+
         val compose = composeMode
         if (compose != null && compose.isActive) {
             compose.appendChar(char)
@@ -321,16 +323,54 @@ internal class KeyboardHandler(
     }
 
     /**
-     * IME text bypasses [onKeyEvent], so it never reaches the selection guard
-     * there. Dismiss any active selection here as well, so soft-keyboard typing
-     * behaves like hardware typing and cannot leave a stale selection armed
-     * (which would silently consume selection-guarded keys such as Enter).
+     * Apply the same selection transition used by [onKeyEvent] before dispatching
+     * character or IME input. Enter finishes and consumes an extending selection;
+     * all other input clears an active selection and continues to the terminal.
      */
-    private fun clearSelectionForTextInput() {
-        val selection = selectionController
-        if (selection != null && selection.isSelectionActive) {
-            selection.clearSelection()
+    private fun selectionConsumesInput(isEnter: Boolean): Boolean {
+        val selection = selectionController ?: return false
+        if (!selection.isSelectionActive) return false
+
+        if (isEnter && selection.isSelectionExtending) {
+            selection.finishSelection()
+            return true
         }
+
+        selection.clearSelection()
+        return false
+    }
+
+    /**
+     * Remove Enter tokens consumed by an extending selection while preserving
+     * any remaining text for normal dispatch. Committed text treats CR and CRLF
+     * as Enter as well as LF, matching [onCommittedText].
+     */
+    private fun applySelectionTransition(
+        text: String,
+        carriageReturnIsEnter: Boolean = false,
+    ): String {
+        if (selectionController?.isSelectionActive != true) return text
+
+        val remaining = StringBuilder(text.length)
+        var index = 0
+        while (index < text.length) {
+            val codepoint = text.codePointAt(index)
+            val codepointLength = Character.charCount(codepoint)
+            val isCarriageReturnEnter = carriageReturnIsEnter && codepoint == '\r'.code
+            val consumed = selectionConsumesInput(
+                isEnter = codepoint == '\n'.code || isCarriageReturnEnter,
+            )
+
+            index += codepointLength
+            if (consumed) {
+                if (isCarriageReturnEnter && index < text.length && text[index] == '\n') {
+                    index++
+                }
+            } else {
+                remaining.appendCodePoint(codepoint)
+            }
+        }
+        return remaining.toString()
     }
 
     /**
@@ -340,14 +380,14 @@ internal class KeyboardHandler(
     fun onTextInput(bytes: ByteArray) {
         if (bytes.isEmpty()) return
 
-        clearSelectionForTextInput()
-
         val raw = bytes.toString(Charsets.UTF_8)
-        val text = if (Normalizer.isNormalized(raw, Normalizer.Form.NFC)) {
+        val normalized = if (Normalizer.isNormalized(raw, Normalizer.Form.NFC)) {
             raw
         } else {
             Normalizer.normalize(raw, Normalizer.Form.NFC)
         }
+        val text = applySelectionTransition(normalized)
+        if (text.isEmpty()) return
 
         val compose = composeMode
         if (compose != null && compose.isActive) {
@@ -374,18 +414,18 @@ internal class KeyboardHandler(
     fun onCommittedText(text: String) {
         if (text.isEmpty()) return
 
-        clearSelectionForTextInput()
-
         val normalized = if (Normalizer.isNormalized(text, Normalizer.Form.NFC)) {
             text
         } else {
             Normalizer.normalize(text, Normalizer.Form.NFC)
         }
+        val input = applySelectionTransition(normalized, carriageReturnIsEnter = true)
+        if (input.isEmpty()) return
         val modifiers = getModifierMask()
 
         var index = 0
-        while (index < normalized.length) {
-            when (val ch = normalized[index]) {
+        while (index < input.length) {
+            when (val ch = input[index]) {
                 '\n' -> {
                     terminalEmulator.dispatchKey(modifiers, VTermKey.ENTER)
                     index += 1
@@ -393,11 +433,11 @@ internal class KeyboardHandler(
 
                 '\r' -> {
                     terminalEmulator.dispatchKey(modifiers, VTermKey.ENTER)
-                    index += if (index + 1 < normalized.length && normalized[index + 1] == '\n') 2 else 1
+                    index += if (index + 1 < input.length && input[index + 1] == '\n') 2 else 1
                 }
 
                 else -> {
-                    val codepoint = normalized.codePointAt(index)
+                    val codepoint = input.codePointAt(index)
                     terminalEmulator.dispatchCharacter(modifiers, codepoint)
                     index += Character.charCount(codepoint)
                 }

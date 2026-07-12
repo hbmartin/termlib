@@ -1026,6 +1026,57 @@ class KeyboardHandlerTest {
         assertEquals(plainEnter.toList(), output.toList())
     }
 
+    private fun assertExtendingSelectionConsumesEnter(block: (KeyboardHandler) -> Unit) {
+        val selection = FakeSelectionController(active = true, extending = true)
+        val output = collectCharacterOutputWithSelection(selection, block)
+
+        assertEquals(1, selection.finishCount)
+        assertEquals(0, selection.clearCount)
+        assertEquals(0, output.size)
+    }
+
+    private fun assertFinishedSelectionPassesEnterThrough(block: (KeyboardHandler) -> Unit) {
+        val plainEnter = collectCharacterOutput {
+            it.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown))
+        }
+        val selection = FakeSelectionController(active = true, extending = false)
+        val output = collectCharacterOutputWithSelection(selection, block)
+
+        assertEquals(0, selection.finishCount)
+        assertEquals(1, selection.clearCount)
+        assertEquals(plainEnter.toList(), output.toList())
+    }
+
+    @Test
+    fun testCharacterInputEnterWhileExtendingSelectionIsConsumed() {
+        assertExtendingSelectionConsumesEnter { it.onCharacterInput('\n') }
+    }
+
+    @Test
+    fun testTextInputEnterWhileExtendingSelectionIsConsumed() {
+        assertExtendingSelectionConsumesEnter { it.onTextInput("\n".toByteArray(Charsets.UTF_8)) }
+    }
+
+    @Test
+    fun testCommittedTextEnterWhileExtendingSelectionIsConsumed() {
+        assertExtendingSelectionConsumesEnter { it.onCommittedText("\r\n") }
+    }
+
+    @Test
+    fun testCharacterInputEnterWithFinishedSelectionReachesTerminal() {
+        assertFinishedSelectionPassesEnterThrough { it.onCharacterInput('\n') }
+    }
+
+    @Test
+    fun testTextInputEnterWithFinishedSelectionReachesTerminal() {
+        assertFinishedSelectionPassesEnterThrough { it.onTextInput("\n".toByteArray(Charsets.UTF_8)) }
+    }
+
+    @Test
+    fun testCommittedTextEnterWithFinishedSelectionReachesTerminal() {
+        assertFinishedSelectionPassesEnterThrough { it.onCommittedText("\r\n") }
+    }
+
     @Test
     fun testEscapeWithActiveSelectionClearsSelectionAndIsConsumed() {
         val selection = FakeSelectionController(active = true)
