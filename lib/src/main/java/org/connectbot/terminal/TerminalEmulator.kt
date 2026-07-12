@@ -93,6 +93,8 @@ sealed interface TerminalEmulator : AutoCloseable {
 
     /**
      * Resize the terminal.
+     *
+     * @throws IllegalArgumentException if [newRows] or [newCols] is not positive
      */
     fun resize(newRows: Int, newCols: Int)
 
@@ -221,8 +223,8 @@ class TerminalEmulatorFactory {
          * Creates the default implementation of TerminalEmulator.
          *
          * @param looper The Looper to use for callback handling (typically main looper)
-         * @param initialRows Initial number of rows
-         * @param initialCols Initial number of columns
+         * @param initialRows Initial number of rows; must be positive
+         * @param initialCols Initial number of columns; must be positive
          * @param defaultForeground Default foreground color
          * @param defaultBackground Default background color
          * @param onKeyboardInput Callback for keyboard output (to write to PTY)
@@ -253,6 +255,7 @@ class TerminalEmulatorFactory {
          *                            redraws — useful on e-ink displays where frequent partial
          *                            refreshes cause ghosting. Damage is never dropped, only
          *                            deferred: the final state is always emitted.
+         * @throws IllegalArgumentException if [initialRows] or [initialCols] is not positive
          */
         fun create(
             looper: Looper = Looper.getMainLooper(),
@@ -339,6 +342,11 @@ internal class TerminalEmulatorImpl(
     private val minUpdateIntervalMs: Long = 0L,
 ) : TerminalEmulator,
     TerminalCallbacks {
+
+    init {
+        require(initialRows > 0) { "rows must be > 0: $initialRows" }
+        require(initialCols > 0) { "columns must be > 0: $initialCols" }
+    }
 
     // Handler for escaping native mutex
     private val handler = Handler(looper)
@@ -499,6 +507,8 @@ internal class TerminalEmulatorImpl(
      * Resize the terminal.
      */
     override fun resize(newRows: Int, newCols: Int) {
+        require(newRows > 0) { "rows must be > 0: $newRows" }
+        require(newCols > 0) { "columns must be > 0: $newCols" }
         val newDimensions = TerminalDimensions(rows = newRows, columns = newCols)
         synchronized(terminalNativeLock) {
             checkNotClosed()
