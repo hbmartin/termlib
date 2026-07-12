@@ -401,15 +401,20 @@ internal class TerminalEmulatorImpl(
     // Sequence number for ordering snapshots
     private var sequenceNumber = 0L
 
-    // Terminal dimensions
+    // Terminal dimensions. A single volatile field keeps the rows/cols pair
+    // atomic, so readers on other threads never see a torn (new rows, old
+    // cols) combination mid-resize.
+    @Volatile
+    private var currentDimensions = TerminalDimensions(rows = initialRows, columns = initialCols)
+
     override val dimensions: TerminalDimensions
-        get() = TerminalDimensions(rows = rows, columns = cols)
+        get() = currentDimensions
 
-    @Volatile
-    private var rows = initialRows
+    private val rows: Int
+        get() = currentDimensions.rows
 
-    @Volatile
-    private var cols = initialCols
+    private val cols: Int
+        get() = currentDimensions.columns
 
     // Cursor state
     private var cursorRow = 0
@@ -494,37 +499,34 @@ internal class TerminalEmulatorImpl(
      * Resize the terminal.
      */
     override fun resize(newRows: Int, newCols: Int) {
+        val newDimensions = TerminalDimensions(rows = newRows, columns = newCols)
         synchronized(terminalNativeLock) {
             checkNotClosed()
-            rows = newRows
-            cols = newCols
             terminalNative.resize(newRows, newCols)
-        }
 
-        // Capture current default colors (thread-safe)
-        val currentDefaultFg: Color
-        val currentDefaultBg: Color
-        synchronized(damageLock) {
-            currentDefaultFg = currentDefaultForeground
-            currentDefaultBg = currentDefaultBackground
-        }
-
-        // Resize currentLines to match new dimensions, preserving semantic segments
-        synchronized(damageLock) {
-            val oldLines = currentLines
-            currentLines = List(newRows) { row ->
-                if (row < oldLines.size) {
-                    // Preserve semantic segments from the old line
-                    TerminalLine.empty(row, newCols, currentDefaultFg, currentDefaultBg)
-                        .copy(semanticSegments = oldLines[row].semanticSegments)
-                } else {
-                    TerminalLine.empty(row, newCols, currentDefaultFg, currentDefaultBg)
+            // Publish the cached lines and their dimensions together. Keeping
+            // this inside terminalNativeLock also prevents a pending line
+            // rebuild from observing the resized native terminal with the old
+            // currentLines cache.
+            synchronized(damageLock) {
+                val currentDefaultFg = currentDefaultForeground
+                val currentDefaultBg = currentDefaultBackground
+                val oldLines = currentLines
+                currentLines = List(newRows) { row ->
+                    if (row < oldLines.size) {
+                        // Preserve semantic segments from the old line
+                        TerminalLine.empty(row, newCols, currentDefaultFg, currentDefaultBg)
+                            .copy(semanticSegments = oldLines[row].semanticSegments)
+                    } else {
+                        TerminalLine.empty(row, newCols, currentDefaultFg, currentDefaultBg)
+                    }
                 }
-            }
-            if (newRows < oldLines.size) {
-                for (row in newRows until oldLines.size) {
-                    removeStoredSegmentTexts(row)
+                if (newRows < oldLines.size) {
+                    for (row in newRows until oldLines.size) {
+                        removeStoredSegmentTexts(row)
+                    }
                 }
+                currentDimensions = newDimensions
             }
         }
 
@@ -534,7 +536,7 @@ internal class TerminalEmulatorImpl(
         // Resize callback - post to handler to avoid blocking native thread
         handler.post {
             if (closed) return@post
-            onResize?.invoke(TerminalDimensions(rows = rows, columns = cols))
+            onResize?.invoke(newDimensions)
         }
     }
 
@@ -1086,10 +1088,13 @@ internal class TerminalEmulatorImpl(
 
         // Update damaged lines (safe to call getCellRun now - not in callback).
         // Take the native lock per row rather than across the whole rebuild so
-        // writeInput can interleave with large redraws.
+        // writeInput can interleave with large redraws. Tradeoff: a write landing
+        // mid-rebuild can leave this snapshot mixing pre- and post-write rows for
+        // one frame; the interleaved write queues fresh damage that repairs it on
+        // the next frame.
+        val currentRows = rows
         for (region in damageRegions) {
             // Ensure row is within bounds [0, rows)
-            val currentRows = rows
             val startRow = region.startRow.coerceIn(0, currentRows - 1)
             val endRow = region.endRow.coerceIn(startRow, currentRows) // endRow is exclusive
             for (row in startRow until endRow) {
@@ -1321,6 +1326,7 @@ internal class TerminalEmulatorImpl(
         // the lock here, the snapshot-building thread might see a stale reference.
         val lines: List<TerminalLine>
         val scrollbackCopy: List<TerminalLine>
+        val dimensions: TerminalDimensions
         synchronized(damageLock) {
             if (scrollbackDirty) {
                 scrollbackSnapshot = scrollback.toList()
@@ -1328,6 +1334,7 @@ internal class TerminalEmulatorImpl(
             }
             lines = currentLines.toList() // Immutable copy (24 references)
             scrollbackCopy = scrollbackSnapshot // Reuse cached immutable copy
+            dimensions = currentDimensions
         }
 
         return TerminalSnapshot(
@@ -1339,8 +1346,8 @@ internal class TerminalEmulatorImpl(
             cursorShape = cursorShape,
             cursorBlink = cursorBlink,
             terminalTitle = terminalTitle,
-            rows = rows,
-            cols = cols,
+            rows = dimensions.rows,
+            cols = dimensions.columns,
             timestamp = System.currentTimeMillis(),
             sequenceNumber = sequenceNumber++,
         )
