@@ -405,7 +405,10 @@ internal class TerminalEmulatorImpl(
     override val dimensions: TerminalDimensions
         get() = TerminalDimensions(rows = rows, columns = cols)
 
+    @Volatile
     private var rows = initialRows
+
+    @Volatile
     private var cols = initialCols
 
     // Cursor state
@@ -1086,8 +1089,9 @@ internal class TerminalEmulatorImpl(
         // writeInput can interleave with large redraws.
         for (region in damageRegions) {
             // Ensure row is within bounds [0, rows)
-            val startRow = region.startRow.coerceIn(0, rows - 1)
-            val endRow = region.endRow.coerceIn(startRow, rows) // endRow is exclusive
+            val currentRows = rows
+            val startRow = region.startRow.coerceIn(0, currentRows - 1)
+            val endRow = region.endRow.coerceIn(startRow, currentRows) // endRow is exclusive
             for (row in startRow until endRow) {
                 synchronized(terminalNativeLock) {
                     if (closed) return
