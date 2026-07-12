@@ -499,36 +499,34 @@ internal class TerminalEmulatorImpl(
      * Resize the terminal.
      */
     override fun resize(newRows: Int, newCols: Int) {
+        val newDimensions = TerminalDimensions(rows = newRows, columns = newCols)
         synchronized(terminalNativeLock) {
             checkNotClosed()
-            currentDimensions = TerminalDimensions(rows = newRows, columns = newCols)
             terminalNative.resize(newRows, newCols)
-        }
 
-        // Capture current default colors (thread-safe)
-        val currentDefaultFg: Color
-        val currentDefaultBg: Color
-        synchronized(damageLock) {
-            currentDefaultFg = currentDefaultForeground
-            currentDefaultBg = currentDefaultBackground
-        }
-
-        // Resize currentLines to match new dimensions, preserving semantic segments
-        synchronized(damageLock) {
-            val oldLines = currentLines
-            currentLines = List(newRows) { row ->
-                if (row < oldLines.size) {
-                    // Preserve semantic segments from the old line
-                    TerminalLine.empty(row, newCols, currentDefaultFg, currentDefaultBg)
-                        .copy(semanticSegments = oldLines[row].semanticSegments)
-                } else {
-                    TerminalLine.empty(row, newCols, currentDefaultFg, currentDefaultBg)
+            // Publish the cached lines and their dimensions together. Keeping
+            // this inside terminalNativeLock also prevents a pending line
+            // rebuild from observing the resized native terminal with the old
+            // currentLines cache.
+            synchronized(damageLock) {
+                val currentDefaultFg = currentDefaultForeground
+                val currentDefaultBg = currentDefaultBackground
+                val oldLines = currentLines
+                currentLines = List(newRows) { row ->
+                    if (row < oldLines.size) {
+                        // Preserve semantic segments from the old line
+                        TerminalLine.empty(row, newCols, currentDefaultFg, currentDefaultBg)
+                            .copy(semanticSegments = oldLines[row].semanticSegments)
+                    } else {
+                        TerminalLine.empty(row, newCols, currentDefaultFg, currentDefaultBg)
+                    }
                 }
-            }
-            if (newRows < oldLines.size) {
-                for (row in newRows until oldLines.size) {
-                    removeStoredSegmentTexts(row)
+                if (newRows < oldLines.size) {
+                    for (row in newRows until oldLines.size) {
+                        removeStoredSegmentTexts(row)
+                    }
                 }
+                currentDimensions = newDimensions
             }
         }
 
@@ -538,7 +536,7 @@ internal class TerminalEmulatorImpl(
         // Resize callback - post to handler to avoid blocking native thread
         handler.post {
             if (closed) return@post
-            onResize?.invoke(currentDimensions)
+            onResize?.invoke(newDimensions)
         }
     }
 
@@ -1328,6 +1326,7 @@ internal class TerminalEmulatorImpl(
         // the lock here, the snapshot-building thread might see a stale reference.
         val lines: List<TerminalLine>
         val scrollbackCopy: List<TerminalLine>
+        val dimensions: TerminalDimensions
         synchronized(damageLock) {
             if (scrollbackDirty) {
                 scrollbackSnapshot = scrollback.toList()
@@ -1335,9 +1334,9 @@ internal class TerminalEmulatorImpl(
             }
             lines = currentLines.toList() // Immutable copy (24 references)
             scrollbackCopy = scrollbackSnapshot // Reuse cached immutable copy
+            dimensions = currentDimensions
         }
 
-        val dimensions = currentDimensions
         return TerminalSnapshot(
             lines = lines,
             scrollback = scrollbackCopy,
