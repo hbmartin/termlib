@@ -54,6 +54,7 @@ internal class KeyboardHandler(
     var modifierManager: ModifierManager? = null,
     var selectionController: SelectionController? = null,
     var onInputProcessed: (() -> Unit)? = null,
+    var onPasteShortcut: (() -> Unit)? = null,
     var onInterceptKey: ((ComposeKeyEvent) -> Boolean)? = null,
     /**
      * Controls how the right-alt key (AltGr) is interpreted. Defaults to
@@ -129,6 +130,14 @@ internal class KeyboardHandler(
         val modifierState = resolveEventModifierState(event)
         val alt = modifierState.alt
         val stripAltGr = modifierState.stripAltGr
+
+        // Hardware Ctrl+Shift+V paste. When no callback is installed the key
+        // combination remains available to the remote terminal application.
+        val pasteShortcut = onPasteShortcut
+        if (pasteShortcut != null && ctrl && shift && !alt && key == Key.V) {
+            pasteShortcut()
+            return true
+        }
 
         // If compose mode is active, intercept all input
         val compose = composeMode

@@ -126,6 +126,47 @@ class KeyboardHandlerTest {
     }
 
     @Test
+    fun testCtrlShiftVInvokesConfiguredPasteShortcut() {
+        var pasteCount = 0
+        keyboardHandler.onPasteShortcut = { pasteCount++ }
+        keyboardHandler.onInputProcessed = { inputProcessedCallCount++ }
+        val meta = AndroidKeyEvent.META_CTRL_ON or AndroidKeyEvent.META_SHIFT_ON
+
+        val handled = keyboardHandler.onKeyEvent(
+            createKeyEventWithMeta(AndroidKeyEvent.KEYCODE_V, meta),
+        )
+
+        assertTrue(handled)
+        assertEquals(1, pasteCount)
+        assertEquals(0, inputProcessedCallCount)
+    }
+
+    @Test
+    fun testCtrlShiftVFallsThroughWithoutPasteShortcut() {
+        keyboardHandler.onInputProcessed = { inputProcessedCallCount++ }
+        val meta = AndroidKeyEvent.META_CTRL_ON or AndroidKeyEvent.META_SHIFT_ON
+
+        val handled = keyboardHandler.onKeyEvent(
+            createKeyEventWithMeta(AndroidKeyEvent.KEYCODE_V, meta),
+        )
+
+        assertTrue(handled)
+        assertEquals(1, inputProcessedCallCount)
+    }
+
+    @Test
+    fun testCtrlVDoesNotInvokePasteShortcut() {
+        var pasteCount = 0
+        keyboardHandler.onPasteShortcut = { pasteCount++ }
+
+        keyboardHandler.onKeyEvent(
+            createKeyEventWithMeta(AndroidKeyEvent.KEYCODE_V, AndroidKeyEvent.META_CTRL_ON),
+        )
+
+        assertEquals(0, pasteCount)
+    }
+
+    @Test
     fun testOnInputProcessedCalledOnceForTextInput() {
         keyboardHandler.onInputProcessed = { inputProcessedCallCount++ }
 

@@ -132,6 +132,27 @@ class TerminalScreenStateUrlTest {
     }
 
     @Test
+    fun fullWidthUrlRowDoesNotGlueToUrlBelow() {
+        // Margin-wrap acceptance must not bridge into a row that carries its
+        // own scheme — two independent URLs printed on adjacent rows must stay
+        // separate even when the first fills the row to the right margin.
+        val state = screenState(
+            43,
+            "https://example.com/very/long/path/xxxxyyyy", // 43 chars, fills row
+            "https://other.example.org/second",
+        )
+
+        assertEquals(
+            "https://example.com/very/long/path/xxxxyyyy",
+            state.getHyperlinkUrlAt(0, 10, autoDetectUrls = true),
+        )
+        assertEquals(
+            "https://other.example.org/second",
+            state.getHyperlinkUrlAt(1, 10, autoDetectUrls = true),
+        )
+    }
+
+    @Test
     fun autoDetectionCanBeDisabledWithoutDisablingOsc8() {
         val line = lineOf(
             row = 0,

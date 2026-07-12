@@ -97,6 +97,19 @@ interface SelectionController {
     fun copySelection(): String
 
     /**
+     * Returns the currently selected text without the clipboard-write and
+     * selection-clear side effects of [copySelection]. Soft-wrapped lines are
+     * rejoined using libvterm's authoritative `softWrapped` flag. Returns "" if
+     * nothing is selected.
+     *
+     * Default implementation returns "" so existing test doubles compile; the
+     * real implementation forwards to the live snapshot. Callers that need the
+     * selection's logical text (smart copy, OSC 52 emitters) should prefer this
+     * over re-extracting from the snapshot themselves.
+     */
+    fun getSelectedText(): String = ""
+
+    /**
      * Clear the selection without copying.
      */
     fun clearSelection()
@@ -246,6 +259,24 @@ internal class SelectionManager {
 
     fun endSelection() {
         isSelecting = false
+        normalizeToReadingOrder()
+    }
+
+    /**
+     * Ensure `start` is the earlier endpoint in reading order (row-major:
+     * top-left-most character). During a drag the range is kept in gesture
+     * order — start = where the finger went down — because the update/drag
+     * logic addresses the moving end by name. Once the gesture commits,
+     * though, the user-facing meaning of the handles is positional: a
+     * left-to-right reader expects the "start" handle on the earlier
+     * character, and the handle hit-test uses the raw start/end fields. Called
+     * from [endSelection]; harmless when already ordered.
+     */
+    internal fun normalizeToReadingOrder() {
+        val r = selectionRange ?: return
+        if (r.startRow > r.endRow || (r.startRow == r.endRow && r.startCol > r.endCol)) {
+            selectionRange = SelectionRange(r.endRow, r.endCol, r.startRow, r.startCol)
+        }
     }
 
     fun clearSelection() {
@@ -274,6 +305,25 @@ internal class SelectionManager {
         mode = SelectionMode.CHARACTER
         isSelecting = false
         selectionRange = SelectionRange(0, 0, rows - 1, cols - 1)
+    }
+
+    /**
+     * Shift only the fixed selection anchor while an active drag scrolls the
+     * viewport underneath it. Rows intentionally are not clamped: the anchor
+     * may sit outside the viewport while still resolving to a scrollback line.
+     */
+    fun shiftSelectionStartByRows(delta: Int) {
+        val range = selectionRange ?: return
+        selectionRange = range.copy(startRow = range.startRow + delta)
+    }
+
+    /** Keep both endpoints attached to their logical lines during viewport scrolling. */
+    fun shiftSelectionByRows(delta: Int) {
+        val range = selectionRange ?: return
+        selectionRange = range.copy(
+            startRow = range.startRow + delta,
+            endRow = range.endRow + delta,
+        )
     }
 
     /**
@@ -328,11 +378,26 @@ internal class SelectionManager {
         }
     }
 
-    private fun getSnapshotLine(snapshot: TerminalSnapshot, row: Int, scrollbackPosition: Int = 0): TerminalLine? = if (scrollbackPosition > 0) {
-        val scrollbackIndex = snapshot.scrollback.size - scrollbackPosition + row
-        snapshot.scrollback.getOrNull(scrollbackIndex)
-    } else {
-        snapshot.lines.getOrNull(row)
+    /**
+     * Resolves a viewport-relative [row] to the underlying [TerminalLine].
+     *
+     * Visible rows in `[0, scrollbackPosition)` show scrollback; rows in
+     * `[scrollbackPosition, rows)` show the top of the current screen. The old
+     * implementation short-circuited the live-tail case (scrollbackPosition ==
+     * 0) to `snapshot.lines.getOrNull(row)`, which returns null for rows that
+     * map to the current screen while partially scrolled back — silently
+     * dropping those rows from copied text and breaking word-boundary
+     * expansion. Use the unified scrollback-aware index for every
+     * scrollbackPosition so it matches [TerminalScreenState.getVisibleLine].
+     */
+    private fun getSnapshotLine(snapshot: TerminalSnapshot, row: Int, scrollbackPosition: Int = 0): TerminalLine? {
+        val sbPos = scrollbackPosition.coerceAtLeast(0)
+        val actualIndex = snapshot.scrollback.size - sbPos + row
+        return if (actualIndex < snapshot.scrollback.size) {
+            snapshot.scrollback.getOrNull(actualIndex)
+        } else {
+            snapshot.lines.getOrNull(actualIndex - snapshot.scrollback.size)
+        }
     }
 
     private fun isWordChar(char: Char): Boolean = char.isLetterOrDigit() || char == '_'
@@ -388,17 +453,11 @@ internal class SelectionManager {
 
         return buildString {
             for (row in minRow..maxRow) {
-                // Get line from the appropriate source based on scrollback position
-                val line = if (scrollbackPosition > 0) {
-                    // Viewing scrollback: get from scrollback (stored newest-first, so reverse index)
-                    val scrollbackIndex = snapshot.scrollback.size - scrollbackPosition + row
-                    snapshot.scrollback.getOrNull(scrollbackIndex)
-                } else {
-                    // Viewing current screen: get from visible lines
-                    snapshot.lines.getOrNull(row)
-                }
-
-                if (line == null) continue
+                // Viewport-relative `row` — resolve through the same
+                // scrollback-aware helper as adjustSelectionForMode so rows
+                // that map to the live screen while partially scrolled back are
+                // not dropped from the copied text.
+                val line = getSnapshotLine(snapshot, row, scrollbackPosition) ?: continue
 
                 when (mode) {
                     SelectionMode.LINE -> {

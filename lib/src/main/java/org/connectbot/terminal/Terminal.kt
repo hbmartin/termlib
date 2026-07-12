@@ -60,6 +60,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -142,6 +143,15 @@ private const val CURSOR_BLINK_RATE_MS = 500L
  * Amount of time to wait for second touch to detect multitouch gesture in milliseconds.
  */
 private const val WAIT_FOR_SECOND_TOUCH_MS = 40L
+
+/** Fraction of the viewport at each vertical edge used for selection auto-scroll. */
+private const val EDGE_SCROLL_ZONE = 0.12f
+
+/** Selection edge-scroll update cadence. */
+private const val EDGE_SCROLL_TICK_MS = 60L
+
+/** Maximum rows advanced per tick when the finger is against the viewport edge. */
+private const val MAX_EDGE_SCROLL_ROWS = 8
 
 /**
  * Text selection magnifier loupe size in dp.
@@ -302,6 +312,8 @@ private const val DOUBLE_UNDERLINE_SPACING = 2f
  * @param onHyperlinkClick Callback when user taps on an OSC8 hyperlink. Receives the URL as parameter.
  * @param onComposeControllerAvailable Optional callback providing access to the ComposeController for handling IME compose state
  * @param onPasteRequest Optional callback for handling a request to paste content, normally triggered by a context menu action
+ * @param onPasteShortcut Optional callback for Ctrl+Shift+V. When null, the key combination is
+ *                        forwarded to the terminal unchanged.
  * @param rightAltMode How the right-alt key should behave (CharacterModifier vs Meta)
  * @param selectionBackgroundColor Background color for selected text (default: 0xFFB3D7FF)
  * @param selectionForegroundColor Foreground color for selected text (default: Black)
@@ -336,6 +348,7 @@ fun Terminal(
     onHyperlinkClick: (String) -> Unit = {},
     onComposeControllerAvailable: ((ComposeController) -> Unit)? = null,
     onPasteRequest: (() -> Unit)? = null,
+    onPasteShortcut: (() -> Unit)? = null,
     rightAltMode: RightAltMode = RightAltMode.CharacterModifier,
     delKeyMode: DelKeyMode = DelKeyMode.Delete,
     onInterceptKey: ((ComposeKeyEvent) -> Boolean)? = null,
@@ -368,6 +381,7 @@ fun Terminal(
         onComposeControllerAvailable = onComposeControllerAvailable,
         onScrollControllerAvailable = null,
         onPasteRequest = onPasteRequest,
+        onPasteShortcut = onPasteShortcut,
         onInterceptKey = onInterceptKey,
         rightAltMode = rightAltMode,
         selectionBackgroundColor = selectionBackgroundColor,
@@ -407,6 +421,7 @@ internal fun TerminalWithAccessibility(
     onComposeControllerAvailable: ((ComposeController) -> Unit)? = null,
     onScrollControllerAvailable: ((ScrollController) -> Unit)? = null,
     onPasteRequest: (() -> Unit)? = null,
+    onPasteShortcut: (() -> Unit)? = null,
     onInterceptKey: ((ComposeKeyEvent) -> Boolean)? = null,
     rightAltMode: RightAltMode = RightAltMode.CharacterModifier,
     selectionBackgroundColor: Color = Color(0xFFB3D7FF),
@@ -450,6 +465,7 @@ internal fun TerminalWithAccessibility(
     }
     SideEffect {
         keyboardHandler.onInterceptKey = currentOnInterceptKey
+        keyboardHandler.onPasteShortcut = onPasteShortcut
     }
 
     // Font size and zoom state
@@ -668,6 +684,11 @@ internal fun TerminalWithAccessibility(
                 return text
             }
 
+            override fun getSelectedText(): String = selectionManager.getSelectedText(
+                screenState.snapshot,
+                screenState.scrollbackPosition,
+            )
+
             override fun clearSelection() {
                 selectionManager.clearSelection()
             }
@@ -877,6 +898,10 @@ internal fun TerminalWithAccessibility(
             }
         }
 
+        // The first resize should paint immediately; later Compose-driven
+        // resize bursts are debounced until their dimensions settle.
+        var initialResizeDone by remember(terminalEmulator) { mutableStateOf(false) }
+
         // Resize terminal when dimensions change
         LaunchedEffect(terminalEmulator, availableWidth, availableHeight, forcedSize, baseCharWidth, baseCharHeight) {
             if (availableWidth == 0 || availableHeight == 0 || baseCharWidth <= 0f || baseCharHeight <= 0f) {
@@ -890,15 +915,22 @@ internal fun TerminalWithAccessibility(
                 forcedSize?.first ?: charsPerDimension(availableHeight, baseCharHeight)
 
             val dimensions = terminalEmulator.dimensions
-            if (newRows != dimensions.rows || newCols != dimensions.columns) {
-                terminalEmulator.resize(newRows, newCols)
+            if (newRows == dimensions.rows && newCols == dimensions.columns) {
+                return@LaunchedEffect
+            }
 
-                // If selection is active, ensure it stays within the new visible bounds.
-                // This ensures the Copy button resets to the last visible line when the screen
-                // shrinks (e.g. keyboard up) without forcing a scroll to the bottom.
-                if (selectionManager.mode != SelectionMode.NONE) {
-                    selectionManager.clampToDimensions(newRows, newCols)
-                }
+            // Changing a key cancels the in-flight effect, leaving only the
+            // final size in an IME-inset or font-metric burst to reach libvterm.
+            if (initialResizeDone) {
+                delay(80)
+            }
+
+            terminalEmulator.resize(newRows, newCols)
+            initialResizeDone = true
+
+            // If selection is active, keep it within the new visible bounds.
+            if (selectionManager.mode != SelectionMode.NONE) {
+                selectionManager.clampToDimensions(newRows, newCols)
             }
         }
 
@@ -925,6 +957,25 @@ internal fun TerminalWithAccessibility(
             val targetOffset = screenState.scrollbackPosition * baseCharHeight
             if (!isUserScrolling && !scrollOffset.isRunning && scrollOffset.value != targetOffset) {
                 scrollOffset.snapTo(targetOffset)
+            }
+        }
+
+        // Keep a completed selection attached to the same logical lines while
+        // ordinary scrolling moves the viewport. Active selection/handle drags
+        // update their anchors explicitly in the edge-scroll paths below.
+        var lastSelectionScrollbackPosition by remember(screenState) {
+            mutableIntStateOf(screenState.scrollbackPosition)
+        }
+        LaunchedEffect(screenState.scrollbackPosition) {
+            val newPosition = screenState.scrollbackPosition
+            val delta = newPosition - lastSelectionScrollbackPosition
+            lastSelectionScrollbackPosition = newPosition
+            if (delta != 0 &&
+                selectionManager.mode != SelectionMode.NONE &&
+                !selectionManager.isSelecting &&
+                !isDraggingHandle
+            ) {
+                selectionManager.shiftSelectionByRows(delta)
             }
         }
 
@@ -995,41 +1046,79 @@ internal fun TerminalWithAccessibility(
 
                                     // Local variable to keep track of which handle we are moving in case they cross
                                     var isMovingStart = touchingStart
+                                    var handleDragPosition = down.position
+
+                                    fun applyHandleAt(position: Offset) {
+                                        val newCol =
+                                            (position.x / baseCharWidth).toInt()
+                                                .coerceIn(0, screenState.snapshot.cols - 1)
+                                        val newRow =
+                                            (position.y / baseCharHeight).toInt()
+                                                .coerceIn(0, screenState.snapshot.rows - 1)
+
+                                        val current = selectionManager.selectionRange ?: return
+                                        val result = applyHandleDrag(
+                                            startRow = current.startRow,
+                                            startCol = current.startCol,
+                                            endRow = current.endRow,
+                                            endCol = current.endCol,
+                                            isMovingStart = isMovingStart,
+                                            newRow = newRow,
+                                            newCol = newCol,
+                                        )
+                                        isMovingStart = result.isMovingStart
+                                        selectionManager.updateSelectionStart(result.startRow, result.startCol)
+                                        selectionManager.updateSelectionEnd(result.endRow, result.endCol)
+                                        selectionManager.adjustSelectionForMode(
+                                            screenState.snapshot.cols,
+                                            screenState.snapshot,
+                                            screenState.scrollbackPosition,
+                                        )
+                                    }
+
+                                    val handleEdgeScrollJob = launch {
+                                        while (true) {
+                                            delay(EDGE_SCROLL_TICK_MS)
+                                            val viewportHeight =
+                                                screenState.snapshot.rows * baseCharHeight
+                                            val direction = edgeScrollDirection(
+                                                handleDragPosition.y,
+                                                viewportHeight,
+                                                screenState.scrollbackPosition,
+                                                screenState.snapshot.scrollback.size,
+                                            )
+                                            if (direction == EdgeScroll.NONE) continue
+                                            val rows = edgeScrollRowsPerTick(
+                                                handleDragPosition.y,
+                                                viewportHeight,
+                                                direction,
+                                            )
+                                            val requestedDelta =
+                                                if (direction == EdgeScroll.UP) rows else -rows
+                                            val oldPosition = screenState.scrollbackPosition
+                                            screenState.scrollBy(requestedDelta)
+                                            val actualDelta =
+                                                screenState.scrollbackPosition - oldPosition
+                                            if (actualDelta == 0) continue
+                                            selectionManager.shiftSelectionByRows(actualDelta)
+                                            lastSelectionScrollbackPosition =
+                                                screenState.scrollbackPosition
+                                            scrollOffset.snapTo(
+                                                screenState.scrollbackPosition * baseCharHeight,
+                                            )
+                                            applyHandleAt(handleDragPosition)
+                                        }
+                                    }
 
                                     try {
                                         drag(down.id) { change ->
-                                            val newCol =
-                                                (change.position.x / baseCharWidth).toInt()
-                                                    .coerceIn(0, screenState.snapshot.cols - 1)
-                                            val newRow =
-                                                (change.position.y / baseCharHeight).toInt()
-                                                    .coerceIn(0, screenState.snapshot.rows - 1)
-
-                                            val current = selectionManager.selectionRange
-                                            if (current != null) {
-                                                val result = applyHandleDrag(
-                                                    startRow = current.startRow,
-                                                    startCol = current.startCol,
-                                                    endRow = current.endRow,
-                                                    endCol = current.endCol,
-                                                    isMovingStart = isMovingStart,
-                                                    newRow = newRow,
-                                                    newCol = newCol,
-                                                )
-                                                isMovingStart = result.isMovingStart
-                                                selectionManager.updateSelectionStart(result.startRow, result.startCol)
-                                                selectionManager.updateSelectionEnd(result.endRow, result.endCol)
-                                                selectionManager.adjustSelectionForMode(
-                                                    screenState.snapshot.cols,
-                                                    screenState.snapshot,
-                                                    screenState.scrollbackPosition,
-                                                )
-                                            }
-
+                                            handleDragPosition = change.position
+                                            applyHandleAt(change.position)
                                             magnifierPosition = change.position
                                             change.consume()
                                         }
                                     } finally {
+                                        handleEdgeScrollJob.cancel()
                                         isDraggingHandle = false
                                     }
 
@@ -1039,6 +1128,11 @@ internal fun TerminalWithAccessibility(
                                         screenState.snapshot,
                                         screenState.scrollbackPosition,
                                     )
+                                    // Re-sort start/end to reading order once the drag commits, so
+                                    // the drawn handles (which use normalized positions) and the
+                                    // handle hit-test (which uses the raw start/end fields) agree
+                                    // after a backward drag.
+                                    selectionManager.normalizeToReadingOrder()
 
                                     showMagnifier = false
                                     // Don't auto-show menu again after dragging handle
@@ -1091,6 +1185,61 @@ internal fun TerminalWithAccessibility(
                         val multiTouchTimeout = down.uptimeMillis + WAIT_FOR_SECOND_TOUCH_MS
                         var panAccumulator = Offset.Zero
                         var initialScrollOffset = 0f
+                        var lastDragPosition = down.position
+
+                        // Pointer events stop while a finger is held still. A
+                        // ticker keeps extending an active selection through
+                        // scrollback until the finger leaves the edge zone.
+                        val selectionEdgeScrollJob = launch {
+                            while (true) {
+                                delay(EDGE_SCROLL_TICK_MS)
+                                if (gestureType != GestureType.Selection ||
+                                    !selectionManager.isSelecting
+                                ) {
+                                    continue
+                                }
+                                val viewportHeight =
+                                    screenState.snapshot.rows * baseCharHeight
+                                val direction = edgeScrollDirection(
+                                    lastDragPosition.y,
+                                    viewportHeight,
+                                    screenState.scrollbackPosition,
+                                    screenState.snapshot.scrollback.size,
+                                )
+                                if (direction == EdgeScroll.NONE) continue
+                                val rows = edgeScrollRowsPerTick(
+                                    lastDragPosition.y,
+                                    viewportHeight,
+                                    direction,
+                                )
+                                val requestedDelta =
+                                    if (direction == EdgeScroll.UP) rows else -rows
+                                val oldPosition = screenState.scrollbackPosition
+                                screenState.scrollBy(requestedDelta)
+                                val actualDelta =
+                                    screenState.scrollbackPosition - oldPosition
+                                if (actualDelta == 0) continue
+
+                                selectionManager.shiftSelectionStartByRows(actualDelta)
+                                lastSelectionScrollbackPosition =
+                                    screenState.scrollbackPosition
+                                scrollOffset.snapTo(
+                                    screenState.scrollbackPosition * baseCharHeight,
+                                )
+                                val dragCol =
+                                    (lastDragPosition.x / baseCharWidth).toInt()
+                                        .coerceIn(0, screenState.snapshot.cols - 1)
+                                val dragRow =
+                                    (lastDragPosition.y / baseCharHeight).toInt()
+                                        .coerceIn(0, screenState.snapshot.rows - 1)
+                                selectionManager.updateSelection(dragRow, dragCol)
+                                selectionManager.adjustSelectionForMode(
+                                    screenState.snapshot.cols,
+                                    screenState.snapshot,
+                                    screenState.scrollbackPosition,
+                                )
+                            }
+                        }
 
                         // 4. Main event loop
                         try {
@@ -1101,6 +1250,7 @@ internal fun TerminalWithAccessibility(
                                 // Use the same pointer that started the gesture for consistency
                                 val change =
                                     event.changes.find { it.id == primaryPointerId } ?: event.changes.first()
+                                lastDragPosition = change.position
 
                                 // Track velocity for all events, including the final UP event.
                                 // addPointerInputChange handles historical positions for better accuracy.
@@ -1128,10 +1278,6 @@ internal fun TerminalWithAccessibility(
                                         isUserScrolling = true
                                         // Adjust initialScrollOffset so (initial + panAccumulator) matches current offset
                                         initialScrollOffset = scrollOffset.value - panAccumulator.y
-                                        // Clear any active selection when scrolling starts
-                                        if (selectionManager.mode != SelectionMode.NONE) {
-                                            selectionManager.clearSelection()
-                                        }
                                     }
                                 }
 
@@ -1186,6 +1332,7 @@ internal fun TerminalWithAccessibility(
                                 change.consume()
                             }
                         } finally {
+                            selectionEdgeScrollJob.cancel()
                             isUserScrolling = false
                         }
 
@@ -1606,7 +1753,9 @@ internal fun TerminalWithAccessibility(
                     ImeInputView(context, keyboardHandler).apply {
                         // Set up key event handling
                         setOnKeyListener { _, _, event ->
-                            if (event.action == KeyEvent.ACTION_DOWN) {
+                            if (event.action == KeyEvent.ACTION_DOWN &&
+                                ImeInputView.shouldResetImeBufferOnKey(event.keyCode)
+                            ) {
                                 resetImeBuffer()
                             }
                             keyboardHandler.onKeyEvent(
@@ -1875,6 +2024,41 @@ private fun DrawScope.drawCurlyUnderline(
         path,
         paint,
     )
+}
+
+internal enum class EdgeScroll { NONE, UP, DOWN }
+
+internal fun edgeScrollDirection(
+    posY: Float,
+    viewportHeightPx: Float,
+    scrollbackPosition: Int,
+    maxScrollback: Int,
+    edgeZone: Float = EDGE_SCROLL_ZONE,
+): EdgeScroll {
+    if (viewportHeightPx <= 0f) return EdgeScroll.NONE
+    val relativeY = posY / viewportHeightPx
+    return when {
+        relativeY < edgeZone && scrollbackPosition < maxScrollback -> EdgeScroll.UP
+        relativeY > 1f - edgeZone && scrollbackPosition > 0 -> EdgeScroll.DOWN
+        else -> EdgeScroll.NONE
+    }
+}
+
+internal fun edgeScrollRowsPerTick(
+    posY: Float,
+    viewportHeightPx: Float,
+    direction: EdgeScroll,
+    edgeZone: Float = EDGE_SCROLL_ZONE,
+    maxRows: Int = MAX_EDGE_SCROLL_ROWS,
+): Int {
+    if (direction == EdgeScroll.NONE || viewportHeightPx <= 0f || maxRows <= 0) return 0
+    val relativeY = posY / viewportHeightPx
+    val depth = when (direction) {
+        EdgeScroll.UP -> ((edgeZone - relativeY) / edgeZone).coerceIn(0f, 1f)
+        EdgeScroll.DOWN -> ((relativeY - (1f - edgeZone)) / edgeZone).coerceIn(0f, 1f)
+        EdgeScroll.NONE -> 0f
+    }
+    return 1 + (depth * (maxRows - 1)).toInt().coerceIn(0, maxRows - 1)
 }
 
 /**

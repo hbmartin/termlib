@@ -157,6 +157,7 @@ class CursorAndModeEscapeTest {
         emulator.send("alt screen content")
 
         val altSnapshot = getSnapshot(impl)
+        assertEquals(true, emulator.isAltScreenActive())
         assertEquals("alt screen shows alt content", "alt screen content", altSnapshot.lines[0].text.trimEnd())
         // Main screen should not be in alt-screen's visible lines
         assertNotEquals("main content not leaked into alt", "main screen line 1", altSnapshot.lines[0].text.trimEnd())
@@ -178,9 +179,21 @@ class CursorAndModeEscapeTest {
         emulator.send("\u001B[?1049l")
 
         val after = getSnapshot(impl)
+        assertEquals(false, emulator.isAltScreenActive())
         assertEquals("row 0 restored", "main line 1", after.lines[0].text.trimEnd())
         assertEquals("row 1 restored", "main line 2", after.lines[1].text.trimEnd())
         assertEquals("row 2 restored", "main line 3", after.lines[2].text.trimEnd())
+    }
+
+    @Test
+    fun testPublicSnapshotLineTextsReflectCurrentScreen() = runBlocking {
+        val emulator = TerminalEmulatorFactory.create(initialRows = 3, initialCols = 20)
+        val impl = emulator as TerminalEmulatorImpl
+
+        emulator.send("public line")
+        getSnapshot(impl)
+
+        assertEquals("public line", emulator.getSnapshotLineTexts().first().trimEnd())
     }
 
     @Test

@@ -115,4 +115,18 @@ class ScrollbackClearTest {
             after.lines.all { it.text.isBlank() },
         )
     }
+
+    @Test
+    fun testConfigurableScrollbackLimit() = runBlocking {
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 3,
+            initialCols = 20,
+            maxScrollbackLines = 2,
+        )
+        val impl = emulator as TerminalEmulatorImpl
+
+        repeat(12) { emulator.send("line $it\r\n") }
+
+        assertEquals(2, getSnapshot(impl).scrollback.size)
+    }
 }

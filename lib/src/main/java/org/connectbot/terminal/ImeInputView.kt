@@ -60,6 +60,7 @@ internal class ImeInputView(
             if (field == value) return
             field = value
             if (windowToken != null) {
+                activeConnection?.flushCompositionAsBackspaces()
                 onRestartInput(this)
             }
         }
@@ -86,6 +87,7 @@ internal class ImeInputView(
         // Always hide IME when view is detached to prevent SHOW_FORCED from keeping keyboard
         // open after the app/activity is destroyed
         hideIme()
+        activeConnection?.cancelPending()
     }
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
@@ -159,6 +161,34 @@ internal class ImeInputView(
         private var composingText: String = ""
         private var awaitingPostEnterCommitReplay: Boolean = false
         private var postEnterSubmittedText: String? = null
+        private val enterHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        private var enterFallbackPending = false
+        private var unpairedEnterKeyEventAt = Long.MIN_VALUE
+        private val enterFallbackRunnable = Runnable {
+            enterFallbackPending = false
+            this@ImeInputView.dispatchKeyEvent(
+                KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER),
+            )
+        }
+
+        /**
+         * Pair a newline-only commit with an Enter key event in either order.
+         * If no matching key event arrives within one frame, dispatch a
+         * fallback for IMEs that only use commitText("\\n").
+         */
+        private fun handleCommittedEnter() {
+            val now = android.os.SystemClock.uptimeMillis()
+            if (unpairedEnterKeyEventAt != Long.MIN_VALUE &&
+                now - unpairedEnterKeyEventAt in 0..ENTER_DEDUP_WINDOW_MS
+            ) {
+                unpairedEnterKeyEventAt = Long.MIN_VALUE
+                return
+            }
+            unpairedEnterKeyEventAt = Long.MIN_VALUE
+            enterHandler.removeCallbacks(enterFallbackRunnable)
+            enterFallbackPending = true
+            enterHandler.postDelayed(enterFallbackRunnable, ENTER_FALLBACK_DELAY_MS)
+        }
 
         override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
             if (!fullEditor) return super.setComposingText(text, newCursorPosition)
@@ -261,6 +291,18 @@ internal class ImeInputView(
         }
 
         override fun sendKeyEvent(event: KeyEvent): Boolean {
+            val isEnterDown = event.action == KeyEvent.ACTION_DOWN &&
+                event.keyCode == KeyEvent.KEYCODE_ENTER
+            if (isEnterDown) {
+                if (enterFallbackPending) {
+                    enterHandler.removeCallbacks(enterFallbackRunnable)
+                    enterFallbackPending = false
+                    unpairedEnterKeyEventAt = Long.MIN_VALUE
+                } else {
+                    unpairedEnterKeyEventAt = android.os.SystemClock.uptimeMillis()
+                }
+            }
+
             if (fullEditor) {
                 val isKeyDown = event.action == KeyEvent.ACTION_DOWN
                 val postEnterSubmittedBeforeDispatch = if (isKeyDown && event.keyCode == KeyEvent.KEYCODE_ENTER) {
@@ -298,8 +340,12 @@ internal class ImeInputView(
 
         override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
             val committedText = text?.toString() ?: ""
+            val isNewlineOnly = committedText.isNotEmpty() &&
+                committedText.all { it == '\n' || it == '\r' }
             if (!fullEditor) {
-                if (committedText.isNotEmpty()) {
+                if (isNewlineOnly) {
+                    handleCommittedEnter()
+                } else if (committedText.isNotEmpty()) {
                     // When in TYPE_NULL mode, Gboard sends regular characters (a-z, etc.) via BOTH
                     // sendKeyEvent AND a raw View.dispatchKeyEvent.
                     //
@@ -341,7 +387,11 @@ internal class ImeInputView(
                 if (previousComposingText.isNotEmpty()) {
                     sendBackspaces(previousComposingText.length)
                 }
-                keyboardHandler.onCommittedText(committedText)
+                if (isNewlineOnly) {
+                    handleCommittedEnter()
+                } else {
+                    keyboardHandler.onCommittedText(committedText)
+                }
             }
             composingText = ""
             editable?.clear()
@@ -370,9 +420,34 @@ internal class ImeInputView(
         fun resetComposition() {
             composingText = ""
         }
+
+        fun flushCompositionAsBackspaces() {
+            if (composingText.isNotEmpty()) {
+                sendBackspaces(composingText.length)
+                composingText = ""
+            }
+        }
+
+        fun cancelPending() {
+            enterHandler.removeCallbacks(enterFallbackRunnable)
+            enterFallbackPending = false
+            unpairedEnterKeyEventAt = Long.MIN_VALUE
+        }
     }
 
-    companion object {
+    internal companion object {
+        private const val ENTER_FALLBACK_DELAY_MS = 16L
+        private const val ENTER_DEDUP_WINDOW_MS = 50L
+
+        fun shouldResetImeBufferOnKey(keyCode: Int): Boolean = when (keyCode) {
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER,
+            KeyEvent.KEYCODE_ESCAPE,
+            -> true
+
+            else -> false
+        }
+
         /** Upper bound on [InputConnection.deleteSurroundingText]'s `leftLength`. */
         private const val MAX_DELETE_SURROUNDING = 4096
     }

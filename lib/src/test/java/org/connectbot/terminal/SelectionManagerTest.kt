@@ -657,6 +657,147 @@ class SelectionManagerTest {
         assertEquals("a b", selectionManager.getSelectedText(snapshot))
     }
 
+    /**
+     * Regression for issue #94: a selection that spans the scrollback→screen
+     * boundary while the viewport is partially scrolled back. Pre-fix,
+     * getSnapshotLine mapped every row to scrollback when scrollbackPosition >
+     * 0, so the rows that resolve to the live screen returned null and were
+     * silently dropped from the copied text.
+     */
+    @Test
+    fun testGetSelectedTextSpansScrollbackToScreenBoundary() {
+        // 2 rows of scrollback visible above, then the top of the screen.
+        val snapshot = makeSnapshotWithScrollback(
+            scrollbackText = listOf("old-2", "old-1"),
+            screenText = listOf("scr-0", "scr-1", "scr-2"),
+            cols = 5,
+        )
+
+        // Scrolled back by 2: row 0 -> "old-2", row 1 -> "old-1", row 2 -> "scr-0".
+        selectionManager.startSelection(0, 0, cols = 5, mode = SelectionMode.CHARACTER)
+        selectionManager.updateSelection(2, 4)
+        selectionManager.endSelection()
+
+        val text = selectionManager.getSelectedText(snapshot, scrollbackPosition = 2)
+        assertEquals("old-2\nold-1\nscr-0", text)
+    }
+
+    /** Sanity: a wholly on-screen selection is unaffected by the #94 fix. */
+    @Test
+    fun testGetSelectedTextOnScreenOnlyUnchanged() {
+        val snapshot = makeSnapshotWithScrollback(
+            scrollbackText = listOf("old-1"),
+            screenText = listOf("scr-0", "scr-1", "scr-2"),
+            cols = 5,
+        )
+
+        selectionManager.startSelection(0, 0, cols = 5, mode = SelectionMode.CHARACTER)
+        selectionManager.updateSelection(1, 4)
+        selectionManager.endSelection()
+
+        val text = selectionManager.getSelectedText(snapshot, scrollbackPosition = 0)
+        assertEquals("scr-0\nscr-1", text)
+    }
+
+    /** Rows past the screen bottom resolve to null cleanly and are skipped. */
+    @Test
+    fun testGetSelectedTextSkipsRowsPastScreenBottom() {
+        val snapshot = makeSnapshotWithScrollback(
+            scrollbackText = emptyList(),
+            screenText = listOf("scr-0", "scr-1"),
+            cols = 5,
+        )
+
+        selectionManager.startSelection(0, 0, cols = 5, mode = SelectionMode.CHARACTER)
+        selectionManager.updateSelection(5, 4)
+        selectionManager.endSelection()
+
+        val text = selectionManager.getSelectedText(snapshot, scrollbackPosition = 0)
+        assertEquals("scr-0\nscr-1", text)
+    }
+
+    @Test
+    fun `backward drag selection is normalized to reading order on end`() {
+        // Drag from (5,10) up-left to (2,3): gesture order has start after end.
+        selectionManager.startSelection(5, 10, 80)
+        selectionManager.updateSelection(2, 3)
+        selectionManager.endSelection()
+
+        val range = selectionManager.selectionRange!!
+        assertEquals(2, range.startRow)
+        assertEquals(3, range.startCol)
+        assertEquals(5, range.endRow)
+        assertEquals(10, range.endCol)
+    }
+
+    @Test
+    fun `backward same-row selection is normalized on end`() {
+        selectionManager.startSelection(4, 20, 80)
+        selectionManager.updateSelection(4, 7)
+        selectionManager.endSelection()
+
+        val range = selectionManager.selectionRange!!
+        assertEquals(7, range.startCol)
+        assertEquals(20, range.endCol)
+    }
+
+    @Test
+    fun `forward selection is unchanged by normalization`() {
+        selectionManager.startSelection(1, 2, 80)
+        selectionManager.updateSelection(3, 4)
+        selectionManager.endSelection()
+
+        val range = selectionManager.selectionRange!!
+        assertEquals(1, range.startRow)
+        assertEquals(2, range.startCol)
+        assertEquals(3, range.endRow)
+        assertEquals(4, range.endCol)
+    }
+
+    @Test
+    fun `selection endpoints track logical rows during scrolling`() {
+        selectionManager.startSelection(1, 2, 80)
+        selectionManager.updateSelection(3, 4)
+        selectionManager.endSelection()
+
+        selectionManager.shiftSelectionByRows(5)
+
+        val range = selectionManager.selectionRange!!
+        assertEquals(6, range.startRow)
+        assertEquals(8, range.endRow)
+    }
+
+    @Test
+    fun `active selection anchor may move outside viewport`() {
+        selectionManager.startSelection(1, 2, 80)
+        selectionManager.updateSelection(0, 4)
+
+        selectionManager.shiftSelectionStartByRows(-3)
+
+        val range = selectionManager.selectionRange!!
+        assertEquals(-2, range.startRow)
+        assertEquals(0, range.endRow)
+    }
+
+    private fun makeSnapshotWithScrollback(
+        scrollbackText: List<String>,
+        screenText: List<String>,
+        cols: Int,
+    ): TerminalSnapshot = TerminalSnapshot(
+        lines = screenText.mapIndexed { i, text -> TerminalLine(row = i, cells = text.map { cell(it) }) },
+        scrollback = scrollbackText.mapIndexed { i, text -> TerminalLine(row = i, cells = text.map { cell(it) }) },
+        cursorRow = 0,
+        cursorCol = 0,
+        cursorVisible = true,
+        cursorBlink = true,
+        cursorShape = CursorShape.BLOCK,
+        terminalTitle = "",
+        rows = screenText.size,
+        cols = cols,
+        timestamp = System.currentTimeMillis(),
+        sequenceNumber = 1L,
+    )
+
     private fun makeSnapshotFromLines(lines: List<TerminalLine>, cols: Int): TerminalSnapshot = TerminalSnapshot(
         lines = lines,
         scrollback = emptyList(),
