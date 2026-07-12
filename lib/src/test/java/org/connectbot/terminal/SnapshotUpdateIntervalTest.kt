@@ -24,6 +24,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.shadows.ShadowChoreographer
+import java.nio.ByteBuffer
 import java.time.Duration
 
 /**
@@ -180,6 +181,28 @@ class SnapshotUpdateIntervalTest {
     }
 
     @Test
+    fun byteBufferWriteAfterCloseIsSilentlyDropped() {
+        // The ByteBuffer overload no longer shares a code path with the
+        // ByteArray one, so pin its drop-after-close behavior separately.
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 5,
+            initialCols = 20,
+        )
+        val impl = emulator as TerminalEmulatorImpl
+        val looper = shadowOf(Looper.getMainLooper())
+
+        emulator.writeInput(directBufferOf("a"), 1)
+        looper.idle()
+        assertEquals("a", screenText(impl))
+
+        emulator.close()
+
+        emulator.writeInput(directBufferOf("b"), 1)
+        looper.idle()
+        assertEquals("a", screenText(impl))
+    }
+
+    @Test
     fun resizeAfterCloseThrows() {
         val emulator = TerminalEmulatorFactory.create(
             initialRows = 5,
@@ -240,5 +263,34 @@ class SnapshotUpdateIntervalTest {
 
         assertEquals("a", screenText(impl))
         assertEquals(emptyList<TerminalUrl>(), emulator.getUrls())
+    }
+
+    @Test
+    fun lastCommandOutputRemainsReadableAfterClose() {
+        // close() retains semanticSegmentTexts so getLastCommandOutput()
+        // stays consistent with the retained snapshot.
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 5,
+            initialCols = 20,
+        )
+        val looper = shadowOf(Looper.getMainLooper())
+
+        // Full OSC 133 shell integration flow: prompt, command input,
+        // output, finished.
+        val input = "\u001B]133;A\u001B\\$ \u001B]133;B\u001B\\ls\r\n" +
+            "\u001B]133;C\u001B\\file1\r\n" +
+            "\u001B]133;D;0\u001B\\"
+        emulator.writeInput(input.toByteArray())
+        looper.idle()
+        assertEquals("file1", emulator.getLastCommandOutput())
+
+        emulator.close()
+
+        assertEquals("file1", emulator.getLastCommandOutput())
+    }
+
+    private fun directBufferOf(text: String): ByteBuffer {
+        val bytes = text.toByteArray()
+        return ByteBuffer.allocateDirect(bytes.size).put(bytes).apply { flip() }
     }
 }

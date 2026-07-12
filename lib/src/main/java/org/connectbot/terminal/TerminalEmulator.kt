@@ -1086,7 +1086,10 @@ internal class TerminalEmulatorImpl(
 
         // Update damaged lines (safe to call getCellRun now - not in callback).
         // Take the native lock per row rather than across the whole rebuild so
-        // writeInput can interleave with large redraws.
+        // writeInput can interleave with large redraws. Tradeoff: a write landing
+        // mid-rebuild can leave this snapshot mixing pre- and post-write rows for
+        // one frame; the interleaved write queues fresh damage that repairs it on
+        // the next frame.
         for (region in damageRegions) {
             // Ensure row is within bounds [0, rows)
             val currentRows = rows
