@@ -401,15 +401,20 @@ internal class TerminalEmulatorImpl(
     // Sequence number for ordering snapshots
     private var sequenceNumber = 0L
 
-    // Terminal dimensions
+    // Terminal dimensions. A single volatile field keeps the rows/cols pair
+    // atomic, so readers on other threads never see a torn (new rows, old
+    // cols) combination mid-resize.
+    @Volatile
+    private var currentDimensions = TerminalDimensions(rows = initialRows, columns = initialCols)
+
     override val dimensions: TerminalDimensions
-        get() = TerminalDimensions(rows = rows, columns = cols)
+        get() = currentDimensions
 
-    @Volatile
-    private var rows = initialRows
+    private val rows: Int
+        get() = currentDimensions.rows
 
-    @Volatile
-    private var cols = initialCols
+    private val cols: Int
+        get() = currentDimensions.columns
 
     // Cursor state
     private var cursorRow = 0
@@ -496,8 +501,7 @@ internal class TerminalEmulatorImpl(
     override fun resize(newRows: Int, newCols: Int) {
         synchronized(terminalNativeLock) {
             checkNotClosed()
-            rows = newRows
-            cols = newCols
+            currentDimensions = TerminalDimensions(rows = newRows, columns = newCols)
             terminalNative.resize(newRows, newCols)
         }
 
@@ -534,7 +538,7 @@ internal class TerminalEmulatorImpl(
         // Resize callback - post to handler to avoid blocking native thread
         handler.post {
             if (closed) return@post
-            onResize?.invoke(TerminalDimensions(rows = rows, columns = cols))
+            onResize?.invoke(currentDimensions)
         }
     }
 
@@ -1090,9 +1094,9 @@ internal class TerminalEmulatorImpl(
         // mid-rebuild can leave this snapshot mixing pre- and post-write rows for
         // one frame; the interleaved write queues fresh damage that repairs it on
         // the next frame.
+        val currentRows = rows
         for (region in damageRegions) {
             // Ensure row is within bounds [0, rows)
-            val currentRows = rows
             val startRow = region.startRow.coerceIn(0, currentRows - 1)
             val endRow = region.endRow.coerceIn(startRow, currentRows) // endRow is exclusive
             for (row in startRow until endRow) {
@@ -1333,6 +1337,7 @@ internal class TerminalEmulatorImpl(
             scrollbackCopy = scrollbackSnapshot // Reuse cached immutable copy
         }
 
+        val dimensions = currentDimensions
         return TerminalSnapshot(
             lines = lines,
             scrollback = scrollbackCopy,
@@ -1342,8 +1347,8 @@ internal class TerminalEmulatorImpl(
             cursorShape = cursorShape,
             cursorBlink = cursorBlink,
             terminalTitle = terminalTitle,
-            rows = rows,
-            cols = cols,
+            rows = dimensions.rows,
+            cols = dimensions.columns,
             timestamp = System.currentTimeMillis(),
             sequenceNumber = sequenceNumber++,
         )

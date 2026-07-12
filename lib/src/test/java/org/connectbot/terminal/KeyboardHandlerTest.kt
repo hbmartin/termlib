@@ -1078,6 +1078,99 @@ class KeyboardHandlerTest {
     }
 
     @Test
+    fun testCommittedTextBareCarriageReturnWhileExtendingSelectionIsConsumed() {
+        assertExtendingSelectionConsumesEnter { it.onCommittedText("\r") }
+    }
+
+    @Test
+    fun testCharacterInputCarriageReturnWhileExtendingSelectionIsConsumed() {
+        assertExtendingSelectionConsumesEnter { it.onCharacterInput('\r') }
+    }
+
+    @Test
+    fun testTextInputCarriageReturnWhileExtendingSelectionIsConsumed() {
+        assertExtendingSelectionConsumesEnter { it.onTextInput("\r".toByteArray(Charsets.UTF_8)) }
+    }
+
+    @Test
+    fun testCharacterInputCarriageReturnWithFinishedSelectionReachesTerminal() {
+        assertFinishedSelectionPassesEnterThrough { it.onCharacterInput('\r') }
+    }
+
+    @Test
+    fun testTextInputCarriageReturnWithFinishedSelectionReachesTerminal() {
+        assertFinishedSelectionPassesEnterThrough { it.onTextInput("\r".toByteArray(Charsets.UTF_8)) }
+    }
+
+    @Test
+    fun testCommittedTextLeadingEnterConsumedRemainingTextDispatched() {
+        // "\nls" while extending: Enter finishes the selection (consumed), then
+        // 'l' clears the now-finished selection and the rest passes through.
+        val baseline = collectCharacterOutput { it.onCommittedText("ls") }
+        val selection = FakeSelectionController(active = true, extending = true)
+        val output = collectCharacterOutputWithSelection(selection) { it.onCommittedText("\nls") }
+
+        assertEquals(1, selection.finishCount)
+        assertEquals(1, selection.clearCount)
+        assertEquals(baseline.toList(), output.toList())
+    }
+
+    @Test
+    fun testCommittedTextTrailingEnterAfterTextClearsSelectionAndDispatchesAll() {
+        // "ls\n" while extending: the leading 'l' clears the selection, so the
+        // trailing Enter is no longer consumed and everything reaches the terminal.
+        val baseline = collectCharacterOutput { it.onCommittedText("ls\n") }
+        val selection = FakeSelectionController(active = true, extending = true)
+        val output = collectCharacterOutputWithSelection(selection) { it.onCommittedText("ls\n") }
+
+        assertEquals(0, selection.finishCount)
+        assertEquals(1, selection.clearCount)
+        assertEquals(baseline.toList(), output.toList())
+    }
+
+    @Test
+    fun testCommittedTextSurrogatePairSurvivesSelectionTransition() {
+        val emoji = "😀" // U+1F600
+        val baseline = collectCharacterOutput { it.onCommittedText(emoji) }
+        val selection = FakeSelectionController(active = true, extending = false)
+        val output = collectCharacterOutputWithSelection(selection) { it.onCommittedText(emoji) }
+
+        assertEquals(1, selection.clearCount)
+        assertEquals(baseline.toList(), output.toList())
+    }
+
+    @Test
+    fun testCharacterInputWithComposeModeActiveLeavesSelectionUntouched() {
+        // Compose mode intercepts before the selection guard, matching onKeyEvent.
+        val selection = FakeSelectionController(active = true, extending = true)
+        val compose = ComposeMode().apply { activate() }
+        val output = collectCharacterOutputWithSelection(selection) {
+            it.composeMode = compose
+            it.onCharacterInput('a')
+        }
+
+        assertEquals(0, selection.clearCount)
+        assertEquals(0, selection.finishCount)
+        assertEquals("a", compose.buffer)
+        assertEquals(0, output.size)
+    }
+
+    @Test
+    fun testTextInputWithComposeModeActiveLeavesSelectionUntouched() {
+        val selection = FakeSelectionController(active = true, extending = true)
+        val compose = ComposeMode().apply { activate() }
+        val output = collectCharacterOutputWithSelection(selection) {
+            it.composeMode = compose
+            it.onTextInput("ab".toByteArray(Charsets.UTF_8))
+        }
+
+        assertEquals(0, selection.clearCount)
+        assertEquals(0, selection.finishCount)
+        assertEquals("ab", compose.buffer)
+        assertEquals(0, output.size)
+    }
+
+    @Test
     fun testEscapeWithActiveSelectionClearsSelectionAndIsConsumed() {
         val selection = FakeSelectionController(active = true)
         val output = collectCharacterOutputWithSelection(selection) {
