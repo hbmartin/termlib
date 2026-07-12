@@ -848,14 +848,15 @@ class KeyboardHandlerTest {
 
     private fun collectCharacterOutput(block: (KeyboardHandler) -> Unit): ByteArray {
         val outputs = mutableListOf<ByteArray>()
-        val emulator = TerminalEmulatorFactory.create(
+        TerminalEmulatorFactory.create(
             initialRows = 24,
             initialCols = 80,
             onKeyboardInput = { data -> outputs.add(data.copyOf()) },
-        )
-        val handler = KeyboardHandler(emulator)
-        block(handler)
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        ).use { emulator ->
+            val handler = KeyboardHandler(emulator)
+            block(handler)
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
         return outputs.flatMap { it.toList() }.toByteArray()
     }
 
@@ -912,6 +913,7 @@ class KeyboardHandlerTest {
 
     private class FakeSelectionController(
         var active: Boolean = true,
+        var extending: Boolean = false,
     ) : SelectionController {
         var clearCount = 0
         var finishCount = 0
@@ -920,20 +922,42 @@ class KeyboardHandlerTest {
         override val isSelectionActive: Boolean
             get() = active
 
-        override fun startSelection(mode: SelectionMode) { active = true }
-        override fun toggleSelection() { active = !active }
-        override fun moveSelectionUp() { moveCount++ }
-        override fun moveSelectionDown() { moveCount++ }
-        override fun moveSelectionLeft() { moveCount++ }
-        override fun moveSelectionRight() { moveCount++ }
+        override val isSelectionExtending: Boolean
+            get() = extending
+
+        override fun startSelection(mode: SelectionMode) {
+            active = true
+            extending = true
+        }
+        override fun toggleSelection() {
+            active = !active
+        }
+        override fun moveSelectionUp() {
+            moveCount++
+        }
+        override fun moveSelectionDown() {
+            moveCount++
+        }
+        override fun moveSelectionLeft() {
+            moveCount++
+        }
+        override fun moveSelectionRight() {
+            moveCount++
+        }
         override fun toggleSelectionMode() {}
         override fun setSelectionMode(mode: SelectionMode) {}
-        override fun selectAll() { active = true }
-        override fun finishSelection() { finishCount++ }
+        override fun selectAll() {
+            active = true
+        }
+        override fun finishSelection() {
+            finishCount++
+            extending = false
+        }
         override fun copySelection(): String = ""
         override fun clearSelection() {
             clearCount++
             active = false
+            extending = false
         }
     }
 
@@ -942,24 +966,26 @@ class KeyboardHandlerTest {
         block: (KeyboardHandler) -> Unit,
     ): ByteArray {
         val outputs = mutableListOf<ByteArray>()
-        val emulator = TerminalEmulatorFactory.create(
+        TerminalEmulatorFactory.create(
             initialRows = 24,
             initialCols = 80,
             onKeyboardInput = { data -> outputs.add(data.copyOf()) },
-        )
-        val handler = KeyboardHandler(emulator, selectionController = selection)
-        block(handler)
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        ).use { emulator ->
+            val handler = KeyboardHandler(emulator, selectionController = selection)
+            block(handler)
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        }
         return outputs.flatMap { it.toList() }.toByteArray()
     }
 
     @Test
-    fun testEnterWithActiveSelectionClearsSelectionAndReachesTerminal() {
+    fun testEnterWithFinishedSelectionClearsSelectionAndReachesTerminal() {
         // Regression test for connectbot/connectbot#2252: a finished-but-not-cleared
-        // selection used to swallow Enter as a no-op forever.
+        // selection (touch selections end by lifting the finger) used to swallow
+        // Enter as a no-op forever.
         val plainEnter = collectCharacterOutput { it.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown)) }
 
-        val selection = FakeSelectionController(active = true)
+        val selection = FakeSelectionController(active = true, extending = false)
         val withSelection = collectCharacterOutputWithSelection(selection) {
             it.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown))
         }
@@ -967,6 +993,37 @@ class KeyboardHandlerTest {
         assertEquals(1, selection.clearCount)
         assertEquals(0, selection.finishCount)
         assertEquals(plainEnter.toList(), withSelection.toList())
+    }
+
+    @Test
+    fun testEnterWhileExtendingSelectionFinishesItAndIsConsumed() {
+        // A keyboard-driven selection that is still extending keeps the classic
+        // copy-mode behavior: Enter finishes the selection and is consumed.
+        val selection = FakeSelectionController(active = true, extending = true)
+        val output = collectCharacterOutputWithSelection(selection) {
+            it.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown))
+        }
+
+        assertEquals(1, selection.finishCount)
+        assertEquals(0, selection.clearCount)
+        assertEquals(0, output.size)
+    }
+
+    @Test
+    fun testSecondEnterAfterFinishingSelectionReachesTerminal() {
+        // Enter finishes an extending selection, then the next Enter clears the
+        // now-finished selection and passes through — the key is never dead.
+        val plainEnter = collectCharacterOutput { it.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown)) }
+
+        val selection = FakeSelectionController(active = true, extending = true)
+        val output = collectCharacterOutputWithSelection(selection) {
+            it.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown))
+            it.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown))
+        }
+
+        assertEquals(1, selection.finishCount)
+        assertEquals(1, selection.clearCount)
+        assertEquals(plainEnter.toList(), output.toList())
     }
 
     @Test

@@ -77,11 +77,17 @@ sealed class UrlScanScope {
 sealed interface TerminalEmulator : AutoCloseable {
     /**
      * Write data to the terminal (from PTY/transport).
+     *
+     * Data written after [close] is silently discarded: PTY reader threads
+     * commonly race view teardown, and late output from a dying session is
+     * not a programming error.
      */
     fun writeInput(data: ByteArray, offset: Int = 0, length: Int = data.size)
 
     /**
      * Write data to the terminal using ByteBuffer (more efficient for large data).
+     *
+     * Data written after [close] is silently discarded.
      */
     fun writeInput(buffer: ByteBuffer, length: Int)
 
@@ -198,8 +204,13 @@ sealed interface TerminalEmulator : AutoCloseable {
     /**
      * Releases native resources and cancels pending snapshot callbacks.
      *
-     * Calling this more than once is safe. After close, methods that mutate or
-     * dispatch terminal input throw [IllegalStateException].
+     * Calling this more than once is safe. After close:
+     * - [writeInput] silently discards data, since PTY reader threads may
+     *   still be delivering output while the session tears down.
+     * - Other mutating calls ([resize], [dispatchKey], [dispatchCharacter],
+     *   [applyColorScheme], [setDefaultColors]) throw [IllegalStateException].
+     * - Read-only accessors ([snapshot], [getUrls], [getLastCommandOutput])
+     *   continue to return the last state emitted before close.
      */
     override fun close()
 }
@@ -332,6 +343,7 @@ internal class TerminalEmulatorImpl(
     // Handler for escaping native mutex
     private val handler = Handler(looper)
     private val terminalNativeLock = Any()
+
     @Volatile
     private var closed = false
 
@@ -440,11 +452,10 @@ internal class TerminalEmulatorImpl(
         }
     }
 
-    private inline fun <T> withOpenTerminalNative(block: TerminalNative.() -> T): T =
-        synchronized(terminalNativeLock) {
-            checkNotClosed()
-            terminalNative.block()
-        }
+    private inline fun <T> withOpenTerminalNative(block: TerminalNative.() -> T): T = synchronized(terminalNativeLock) {
+        checkNotClosed()
+        terminalNative.block()
+    }
 
     // Parser for OSC sequences
     private val oscParser = OscParser()
@@ -455,26 +466,37 @@ internal class TerminalEmulatorImpl(
 
     /**
      * Write data to the terminal (from PTY/transport).
+     * Data arriving after [close] is dropped rather than treated as an error,
+     * because PTY reader threads commonly race teardown.
      */
     override fun writeInput(data: ByteArray, offset: Int, length: Int) {
-        withOpenTerminalNative { writeInput(data, offset, length) }
+        synchronized(terminalNativeLock) {
+            if (closed) return
+            terminalNative.writeInput(data, offset, length)
+        }
     }
 
     /**
      * Write data to the terminal using ByteBuffer (more efficient for large data).
+     * Data arriving after [close] is dropped rather than treated as an error.
      */
     override fun writeInput(buffer: ByteBuffer, length: Int) {
-        withOpenTerminalNative { writeInput(buffer, length) }
+        synchronized(terminalNativeLock) {
+            if (closed) return
+            terminalNative.writeInput(buffer, length)
+        }
     }
 
     /**
      * Resize the terminal.
      */
     override fun resize(newRows: Int, newCols: Int) {
-        checkNotClosed()
-        rows = newRows
-        cols = newCols
-        withOpenTerminalNative { resize(newRows, newCols) }
+        synchronized(terminalNativeLock) {
+            checkNotClosed()
+            rows = newRows
+            cols = newCols
+            terminalNative.resize(newRows, newCols)
+        }
 
         // Capture current default colors (thread-safe)
         val currentDefaultFg: Color
@@ -599,7 +621,6 @@ internal class TerminalEmulatorImpl(
             pendingSemanticSegments.clear()
             pendingCommandFinishedDurations.clear()
             movedSegmentRows.clear()
-            semanticSegmentTexts.clear()
             damagePosted = false
             cursorMoved = false
             propertyChanged = false
@@ -609,8 +630,6 @@ internal class TerminalEmulatorImpl(
             pendingFrameCallback = null
         }
 
-        handler.removeCallbacks(processPendingUpdatesRunnable)
-        handler.removeCallbacks(postFrameCallbackRunnable)
         handler.removeCallbacksAndMessages(null)
         if (frameChoreographer != null && frameCallback != null) {
             frameChoreographer.removeFrameCallback(frameCallback)
@@ -1062,14 +1081,16 @@ internal class TerminalEmulatorImpl(
 
         if (!needsUpdate) return
 
-        // Update damaged lines (safe to call getCellRun now - not in callback)
-        synchronized(terminalNativeLock) {
-            if (closed) return
-            for (region in damageRegions) {
-                // Ensure row is within bounds [0, rows)
-                val startRow = region.startRow.coerceIn(0, rows - 1)
-                val endRow = region.endRow.coerceIn(startRow, rows) // endRow is exclusive
-                for (row in startRow until endRow) {
+        // Update damaged lines (safe to call getCellRun now - not in callback).
+        // Take the native lock per row rather than across the whole rebuild so
+        // writeInput can interleave with large redraws.
+        for (region in damageRegions) {
+            // Ensure row is within bounds [0, rows)
+            val startRow = region.startRow.coerceIn(0, rows - 1)
+            val endRow = region.endRow.coerceIn(startRow, rows) // endRow is exclusive
+            for (row in startRow until endRow) {
+                synchronized(terminalNativeLock) {
+                    if (closed) return
                     updateLine(row, region, preserveMovedSegments = row in movedRows)
                 }
             }
