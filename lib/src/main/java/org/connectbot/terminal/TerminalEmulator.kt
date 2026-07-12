@@ -82,7 +82,7 @@ sealed interface TerminalEmulator : AutoCloseable {
      * commonly race view teardown, and late output from a dying session is
      * not a programming error.
      */
-    fun writeInput(data: ByteArray, offset: Int = 0, length: Int = data.size)
+    fun writeInput(data: ByteArray, offset: Int = 0, length: Int = data.size - offset)
 
     /**
      * Write data to the terminal using ByteBuffer (more efficient for large data).
@@ -204,6 +204,22 @@ sealed interface TerminalEmulator : AutoCloseable {
     fun getUrls(scope: UrlScanScope = UrlScanScope.CurrentView): List<TerminalUrl>
 
     /**
+     * Plain-text lines of the current terminal snapshot. Public accessor so
+     * consumers outside this module can read line text without reflecting into
+     * the internal `snapshot` StateFlow (whose getter is name-mangled by
+     * Kotlin's internal visibility). Returns a fresh list at call time.
+     */
+    fun getSnapshotLineTexts(): List<String>
+
+    /**
+     * True while the emulator is actually rendering the alternate screen
+     * buffer (e.g. a full-screen app like vim or less is active). Snapshot-
+     * derived, so it is safe to read from the UI thread and is at most one
+     * frame stale — fine for gesture routing and status display.
+     */
+    fun isAltScreenActive(): Boolean
+
+    /**
      * Releases native resources and cancels pending snapshot callbacks.
      *
      * Calling this more than once is safe. After close:
@@ -255,6 +271,9 @@ class TerminalEmulatorFactory {
          *                            redraws — useful on e-ink displays where frequent partial
          *                            refreshes cause ghosting. Damage is never dropped, only
          *                            deferred: the final state is always emitted.
+         * @param maxScrollbackLines Maximum number of lines kept in scrollback before the oldest
+         *                           entries are evicted. Defaults to 1000 and is coerced to at
+         *                           least zero.
          * @throws IllegalArgumentException if [initialRows] or [initialCols] is not positive
          */
         fun create(
@@ -272,6 +291,7 @@ class TerminalEmulatorFactory {
             autoDetectUrls: Boolean = false,
             boldAsBright: Boolean = true,
             minUpdateIntervalMs: Long = 0L,
+            maxScrollbackLines: Int = 1000,
         ): TerminalEmulator = TerminalEmulatorImpl(
             looper = looper,
             initialRows = initialRows,
@@ -287,6 +307,7 @@ class TerminalEmulatorFactory {
             autoDetectUrls = autoDetectUrls,
             boldAsBright = boldAsBright,
             minUpdateIntervalMs = minUpdateIntervalMs,
+            maxScrollbackLines = maxScrollbackLines,
         )
     }
 }
@@ -324,6 +345,7 @@ class TerminalEmulatorFactory {
  *                          command duration in milliseconds (-1 if no start marker was seen)
  * @param minUpdateIntervalMs Minimum interval in milliseconds between snapshot emissions
  *                            (0 = display-frame cadence)
+ * @param maxScrollbackLines Maximum number of lines retained in scrollback
  */
 internal class TerminalEmulatorImpl(
     private val looper: Looper = Looper.getMainLooper(),
@@ -340,6 +362,7 @@ internal class TerminalEmulatorImpl(
     override val autoDetectUrls: Boolean = false,
     override val boldAsBright: Boolean = true,
     private val minUpdateIntervalMs: Long = 0L,
+    maxScrollbackLines: Int = 1000,
 ) : TerminalEmulator,
     TerminalCallbacks {
 
@@ -433,11 +456,11 @@ internal class TerminalEmulatorImpl(
 
     // Terminal properties
     private var terminalTitle = ""
-    private var isAltScreenActive = false
+    private var altScreenActive = false
 
     // Scrollback buffer
     private val scrollback = mutableListOf<TerminalLine>()
-    private val maxScrollbackLines = 1000
+    private val maxScrollbackLines = maxScrollbackLines.coerceAtLeast(0)
 
     // Cached immutable copy of scrollback - only recreate when scrollback changes
     private var scrollbackSnapshot: List<TerminalLine> = emptyList()
@@ -512,6 +535,7 @@ internal class TerminalEmulatorImpl(
         val newDimensions = TerminalDimensions(rows = newRows, columns = newCols)
         synchronized(terminalNativeLock) {
             checkNotClosed()
+            val oldCols = currentDimensions.columns
             terminalNative.resize(newRows, newCols)
 
             // Publish the cached lines and their dimensions together. Keeping
@@ -524,9 +548,17 @@ internal class TerminalEmulatorImpl(
                 val oldLines = currentLines
                 currentLines = List(newRows) { row ->
                     if (row < oldLines.size) {
-                        // Preserve semantic segments from the old line
-                        TerminalLine.empty(row, newCols, currentDefaultFg, currentDefaultBg)
-                            .copy(semanticSegments = oldLines[row].semanticSegments)
+                        if (newCols == oldCols) {
+                            // Rows-only resizes do not change cell layout. Retain
+                            // real content until the full damage re-pull runs so a
+                            // concurrent snapshot cannot publish a blank screen.
+                            oldLines[row]
+                        } else {
+                            // Width changes require reflow; retain only semantic
+                            // metadata until native cells are re-read.
+                            TerminalLine.empty(row, newCols, currentDefaultFg, currentDefaultBg)
+                                .copy(semanticSegments = oldLines[row].semanticSegments)
+                        }
                     } else {
                         TerminalLine.empty(row, newCols, currentDefaultFg, currentDefaultBg)
                     }
@@ -581,10 +613,16 @@ internal class TerminalEmulatorImpl(
     override fun getUrls(scope: UrlScanScope): List<TerminalUrl> {
         val currentSnapshot = _snapshot.value
         val altScreenActive = synchronized(damageLock) {
-            isAltScreenActive
+            this.altScreenActive
         }
         return extractUrls(currentSnapshot.linesForUrlScan(scope, altScreenActive))
     }
+
+    override fun getSnapshotLineTexts(): List<String> = _snapshot.value.lines.map { it.text }
+
+    // Snapshot-derived (not the raw altScreenActive var) so it is safe to read
+    // from the UI thread; at most one frame stale, which is fine for callers.
+    override fun isAltScreenActive(): Boolean = _snapshot.value.altScreen
 
     /**
      * Set ANSI palette colors (indices 0-15).
@@ -758,8 +796,18 @@ internal class TerminalEmulatorImpl(
 
                         // Property 3 is VTERM_PROP_ALTSCREEN (from vterm.h line 256)
                         3 -> {
-                            isAltScreenActive = value.value
+                            val wasAltScreenActive = altScreenActive
+                            altScreenActive = value.value
                             propertyChanged = true
+                            if (wasAltScreenActive && !value.value) {
+                                // The Kotlin line cache can be stale after the
+                                // primary buffer is restored. Force a complete
+                                // re-pull instead of waiting for sparse shell damage.
+                                pendingDamageRegions.clear()
+                                pendingDamageRegions.add(
+                                    DamageRegion(0, rows, 0, cols, preserveSegments = true),
+                                )
+                            }
                         }
                     }
                 }
@@ -1337,6 +1385,7 @@ internal class TerminalEmulatorImpl(
         val lines: List<TerminalLine>
         val scrollbackCopy: List<TerminalLine>
         val dimensions: TerminalDimensions
+        val altScreen: Boolean
         synchronized(damageLock) {
             if (scrollbackDirty) {
                 scrollbackSnapshot = scrollback.toList()
@@ -1345,6 +1394,7 @@ internal class TerminalEmulatorImpl(
             lines = currentLines.toList() // Immutable copy (24 references)
             scrollbackCopy = scrollbackSnapshot // Reuse cached immutable copy
             dimensions = currentDimensions
+            altScreen = altScreenActive
         }
 
         return TerminalSnapshot(
@@ -1360,6 +1410,7 @@ internal class TerminalEmulatorImpl(
             cols = dimensions.columns,
             timestamp = System.currentTimeMillis(),
             sequenceNumber = sequenceNumber++,
+            altScreen = altScreen,
         )
     }
 
@@ -1480,6 +1531,11 @@ internal class TerminalEmulatorImpl(
         }
         val run = nextText.substring(start, end)
         if (run.trimDetectedUrl().isEmpty()) return null
+
+        // A row carrying its own URL scheme is a new URL, never a
+        // continuation — two independent URLs printed on adjacent rows must
+        // not be joined even when the first row runs to the right margin.
+        if (run.contains("://")) return null
 
         val prevEndsWithDelimiter = previousEndCol > 0 && previousText[previousEndCol - 1] in "/?&=#"
         val nextStartsWithQueryOrFragment = run.isNotEmpty() && run[0] in "?&#"

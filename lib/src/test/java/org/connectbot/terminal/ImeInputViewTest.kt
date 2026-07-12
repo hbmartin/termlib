@@ -17,6 +17,7 @@
 package org.connectbot.terminal
 
 import android.content.Context
+import android.os.Looper
 import android.os.SystemClock
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
@@ -33,7 +34,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Shadows.shadowOf
 import java.text.Normalizer
+import java.time.Duration
 
 @RunWith(AndroidJUnit4::class)
 class ImeInputViewTest {
@@ -261,6 +264,54 @@ class ImeInputViewTest {
         return ic!! to outputs
     }
 
+    private fun enterCount(outputs: List<ByteArray>): Int = outputs.sumOf { data ->
+        data.count { it == '\r'.code.toByte() || it == '\n'.code.toByte() }
+    }
+
+    @Test
+    fun testCommitThenKeyEventDispatchesOneEnter() {
+        val (ic, outputs) = createKeyboardOutputCapture()
+
+        ic.commitText("\n", 1)
+        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(60))
+
+        assertEquals(1, enterCount(outputs))
+    }
+
+    @Test
+    fun testKeyEventThenCommitDispatchesOneEnter() {
+        val (ic, outputs) = createKeyboardOutputCapture()
+
+        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+        ic.commitText("\n", 1)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(60))
+
+        assertEquals(1, enterCount(outputs))
+    }
+
+    @Test
+    fun testCommitOnlyDispatchesFallbackEnter() {
+        val (ic, outputs) = createKeyboardOutputCapture()
+
+        ic.commitText("\n", 1)
+        assertEquals(0, enterCount(outputs))
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(20))
+
+        assertEquals(1, enterCount(outputs))
+    }
+
+    @Test
+    fun testPhysicalKeyboardResetPolicyOnlyUsesCommandBoundaries() {
+        assertTrue(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_ENTER))
+        assertTrue(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_NUMPAD_ENTER))
+        assertTrue(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_ESCAPE))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_A))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_SHIFT_LEFT))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_DPAD_LEFT))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_DEL))
+    }
+
     private data class ComposeReplayCapture(
         val ic: InputConnection,
         val outputs: MutableList<ByteArray>,
@@ -288,7 +339,11 @@ class ImeInputViewTest {
             ).also { v ->
                 v.isComposeModeActive = true
                 v.setOnKeyListener { _, _, event ->
-                    if (event.action == KeyEvent.ACTION_DOWN) v.resetImeBuffer()
+                    if (event.action == KeyEvent.ACTION_DOWN &&
+                        ImeInputView.shouldResetImeBufferOnKey(event.keyCode)
+                    ) {
+                        v.resetImeBuffer()
+                    }
                     handler.onKeyEvent(androidx.compose.ui.input.key.KeyEvent(event))
                 }
             }
@@ -541,7 +596,11 @@ class ImeInputViewTest {
         InstrumentationRegistry.getInstrumentation().runOnMainSync {
             view = ImeInputView(context, handler).also { v ->
                 v.setOnKeyListener { _, _, event ->
-                    if (event.action == KeyEvent.ACTION_DOWN) v.resetImeBuffer()
+                    if (event.action == KeyEvent.ACTION_DOWN &&
+                        ImeInputView.shouldResetImeBufferOnKey(event.keyCode)
+                    ) {
+                        v.resetImeBuffer()
+                    }
                     handler.onKeyEvent(androidx.compose.ui.input.key.KeyEvent(event))
                 }
                 ic = v.onCreateInputConnection(EditorInfo())
@@ -602,7 +661,11 @@ class ImeInputViewTest {
         InstrumentationRegistry.getInstrumentation().runOnMainSync {
             view = ImeInputView(context, handler).also { v ->
                 v.setOnKeyListener { _, _, event ->
-                    if (event.action == KeyEvent.ACTION_DOWN) v.resetImeBuffer()
+                    if (event.action == KeyEvent.ACTION_DOWN &&
+                        ImeInputView.shouldResetImeBufferOnKey(event.keyCode)
+                    ) {
+                        v.resetImeBuffer()
+                    }
                     handler.onKeyEvent(androidx.compose.ui.input.key.KeyEvent(event))
                 }
                 v.onCreateInputConnection(EditorInfo())
@@ -700,7 +763,11 @@ class ImeInputViewTest {
         InstrumentationRegistry.getInstrumentation().runOnMainSync {
             ImeInputView(context, handler).also { v ->
                 v.setOnKeyListener { _, _, event ->
-                    if (event.action == KeyEvent.ACTION_DOWN) v.resetImeBuffer()
+                    if (event.action == KeyEvent.ACTION_DOWN &&
+                        ImeInputView.shouldResetImeBufferOnKey(event.keyCode)
+                    ) {
+                        v.resetImeBuffer()
+                    }
                     handler.onKeyEvent(androidx.compose.ui.input.key.KeyEvent(event))
                 }
                 ic = v.onCreateInputConnection(EditorInfo())
