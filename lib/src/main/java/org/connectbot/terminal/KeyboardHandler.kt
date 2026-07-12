@@ -345,7 +345,9 @@ internal class KeyboardHandler(
      * Remove Enter tokens consumed by an extending selection while preserving
      * any remaining text for normal dispatch. LF, CR, and CRLF all count as
      * Enter; a consumed CR swallows an immediately following LF so the pair is
-     * treated as a single token, matching [dispatchTerminalText].
+     * treated as a single token, matching [dispatchTerminalText]. Pairing only
+     * applies within a single call: a CRLF split across two calls counts as
+     * two Enters, an accepted limitation since real IMEs commit CRLF atomically.
      */
     private fun applySelectionTransition(text: String): String {
         if (selectionController?.isSelectionActive != true) return text
@@ -426,7 +428,8 @@ internal class KeyboardHandler(
 
     /**
      * Dispatch text to the terminal, sending LF, CR, and CRLF as a single
-     * Enter key each and everything else as characters.
+     * Enter key each and everything else as characters. CRLF pairing is
+     * per-call: a pair split across calls dispatches two Enters.
      */
     private fun dispatchTerminalText(text: String, modifiers: Int) {
         var index = 0

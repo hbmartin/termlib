@@ -1140,6 +1140,40 @@ class KeyboardHandlerTest {
     }
 
     @Test
+    fun testCommittedTextSplitCarriageReturnLineFeedSendsTwoEnters() {
+        // CRLF pairing is per-call: a CR ending one commit and an LF starting
+        // the next cannot be joined, so each dispatches its own Enter. Real
+        // IMEs commit CRLF atomically; this pins the accepted limitation.
+        val singleEnter = collectCharacterOutput { it.onCommittedText("\r\n") }
+        val split = collectCharacterOutput {
+            it.onCommittedText("\r")
+            it.onCommittedText("\n")
+        }
+
+        assertEquals((singleEnter + singleEnter).toList(), split.toList())
+    }
+
+    @Test
+    fun testCommittedTextSplitCarriageReturnLineFeedWhileExtendingSelectionSendsOneEnter() {
+        // Split CRLF while extending: the CR finishes the selection (consumed),
+        // then the LF arrives as a separate Enter that clears the now-finished
+        // selection and reaches the terminal — unlike an unsplit "\r\n", which
+        // is consumed entirely.
+        val plainEnter = collectCharacterOutput {
+            it.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown))
+        }
+        val selection = FakeSelectionController(active = true, extending = true)
+        val output = collectCharacterOutputWithSelection(selection) {
+            it.onCommittedText("\r")
+            it.onCommittedText("\n")
+        }
+
+        assertEquals(1, selection.finishCount)
+        assertEquals(1, selection.clearCount)
+        assertEquals(plainEnter.toList(), output.toList())
+    }
+
+    @Test
     fun testCharacterInputWithComposeModeActiveLeavesSelectionUntouched() {
         // Compose mode intercepts before the selection guard, matching onKeyEvent.
         val selection = FakeSelectionController(active = true, extending = true)
