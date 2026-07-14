@@ -227,8 +227,9 @@ sealed interface TerminalEmulator : AutoCloseable {
      *   still be delivering output while the session tears down.
      * - Other mutating calls ([resize], [dispatchKey], [dispatchCharacter],
      *   [applyColorScheme], [setDefaultColors]) throw [IllegalStateException].
-     * - Read-only accessors ([snapshot], [getUrls], [getLastCommandOutput])
-     *   continue to return the last state emitted before close.
+     * - Read-only accessors ([getSnapshotLineTexts], [getUrls],
+     *   [getLastCommandOutput]) continue to return the last state emitted
+     *   before close.
      */
     override fun close()
 }
